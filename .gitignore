@@ -31,3 +31,5 @@ web/dist/
 # Planning docs — kept locally, not tracked
 /specs/
 /docs/
+
+claude.md
