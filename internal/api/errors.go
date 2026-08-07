@@ -42,7 +42,7 @@ func writeInvalidCredentials(w http.ResponseWriter, r *http.Request) {
 // E2), then returns an opaque 500 — the caller's err is never leaked to the
 // client.
 func (s *Server) writeInternalError(w http.ResponseWriter, r *http.Request, err error) {
-	s.log.Error("internal error",
+	s.log.ErrorContext(r.Context(), "internal error",
 		slog.String("trace_id", traceIDFromContext(r.Context())),
 		slog.String("path", r.URL.Path),
 		slog.Any("err", err))

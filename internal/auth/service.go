@@ -114,7 +114,7 @@ func (s *Service) Register(ctx context.Context, email, password string) (TokenPa
 	if err != nil {
 		return TokenPair{}, err
 	}
-	s.log.Info("user registered", slog.String("user_id", user.ID.String()))
+	s.log.InfoContext(ctx, "user registered", slog.String("user_id", user.ID.String()))
 	return pair, nil
 }
 
@@ -146,7 +146,7 @@ func (s *Service) Login(ctx context.Context, email, password string) (TokenPair,
 	if err != nil {
 		return TokenPair{}, err
 	}
-	s.log.Info("user logged in", slog.String("user_id", user.ID.String()))
+	s.log.InfoContext(ctx, "user logged in", slog.String("user_id", user.ID.String()))
 	return pair, nil
 }
 
@@ -196,7 +196,7 @@ func (s *Service) Logout(ctx context.Context, callerID uuid.UUID, refreshToken s
 	if err := s.store.RevokeRefreshToken(ctx, rt.ID); err != nil {
 		return fmt.Errorf("auth: logout: %w", err)
 	}
-	s.log.Info("user logged out", slog.String("user_id", callerID.String()))
+	s.log.InfoContext(ctx, "user logged out", slog.String("user_id", callerID.String()))
 	return nil
 }
 

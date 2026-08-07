@@ -39,7 +39,7 @@ func recoverPanic(log *slog.Logger) func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			defer func() {
 				if rec := recover(); rec != nil {
-					log.Error("panic recovered",
+					log.ErrorContext(r.Context(), "panic recovered",
 						slog.Any("panic", rec),
 						slog.String("trace_id", traceIDFromContext(r.Context())),
 						slog.String("path", r.URL.Path))

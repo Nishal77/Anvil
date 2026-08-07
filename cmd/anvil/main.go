@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"log/slog"
 	"os"
@@ -15,9 +16,20 @@ import (
 	"github.com/anvil-dev/anvil/internal/config"
 	"github.com/anvil-dev/anvil/internal/storage"
 	"github.com/anvil-dev/anvil/internal/telemetry"
+	"github.com/anvil-dev/anvil/internal/version"
 )
 
 func main() {
+	showVersion := flag.Bool("version", false, "print version and exit")
+	flag.Parse()
+
+	if *showVersion {
+		// A failed write to stdout on a --version flag leaves nothing
+		// useful to do; there is no error path to report it through.
+		_, _ = fmt.Fprintln(os.Stdout, version.String())
+		return
+	}
+
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

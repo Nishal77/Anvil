@@ -16,12 +16,32 @@ linters:
       forbid:
         - pattern: ^fmt\.Print.*$
           msg: "use log/slog, not fmt.Print* — CLAUDE.md §5.2"
+        - pattern: ^os\.Getenv$
+          msg: "env vars are read in internal/config only — add a field to config.Config instead"
     gocyclo:
       min-complexity: 10
     gocognit:
       min-complexity: 15
     nestif:
       min-complexity: 3
+  exclusions:
+    rules:
+      # contextcheck cannot follow context flow through a three-level
+      # closure (middleware factory -> handler -> deferred recover func),
+      # and flags every ctx-using call inside a `defer func() { recover()
+      # ... }()` as "should pass the context parameter" even when it
+      # already does (r.Context() is passed explicitly). This is the
+      # standard Go panic-recovery idiom, not a place ctx is actually
+      # dropped — verified by reading internal/api/middleware.go's
+      # recoverPanic by hand.
+      - path: internal/api/middleware\.go
+        linters:
+          - contextcheck
+      # os.Getenv is the one thing internal/config exists to wrap — see
+      # the forbidigo rule above.
+      - path: internal/config/config\.go
+        linters:
+          - forbidigo
 
 issues:
   max-issues-per-linter: 0

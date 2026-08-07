@@ -14,7 +14,13 @@ MODULE          := github.com/anvil-dev/anvil
 BIN_DIR         := bin
 COVER_PROFILE   := coverage.out
 COVER_MIN       := 70
-CORE_PKGS       := ./internal/queue/... ./internal/agent/... ./internal/events/... ./internal/llm/...
+# Every internal/ package that currently exists, discovered at run time —
+# not a fixed queue/agent/events/llm list. That list is Phase 2's final
+# roster; enforcing coverage only once all four exist would leave Week 1-4
+# packages (api, auth, storage, ...) with no coverage gate at all. Discovery
+# means `make ci` enforces 70% on whatever is actually there, every commit,
+# from Week 1 onward — matches "make ci green is part of Week 1's work."
+CORE_PKGS       := $(shell find internal -mindepth 1 -maxdepth 1 -type d | sed 's|^|./|;s|$$|/...|' | sort)
 
 VERSION         := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT          := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)

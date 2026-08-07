@@ -1,0 +1,9 @@
+.git/
+bin/
+*.test
+coverage.out
+coverage.html
+specs/
+docs/
+web/node_modules/
+.DS_Store

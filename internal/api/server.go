@@ -112,9 +112,12 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 		return nil
 	case <-ctx.Done():
+		// Deliberately not derived from ctx: we're in this branch because
+		// ctx is already Done, so a child of it would expire immediately
+		// and Shutdown would get no grace period at all.
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownGracePeriod)
 		defer cancel()
-		if err := s.httpServer.Shutdown(shutdownCtx); err != nil {
+		if err := s.httpServer.Shutdown(shutdownCtx); err != nil { //nolint:contextcheck // reason: shutdownCtx is intentionally rooted at context.Background(), not ctx — see comment above
 			return fmt.Errorf("api: graceful shutdown: %w", err)
 		}
 		<-serveErr
