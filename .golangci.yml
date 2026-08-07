@@ -5,6 +5,7 @@ linters:
     - forbidigo     # bans fmt.Println/Print — log/slog only (CLAUDE.md §5.2)
     - contextcheck   # ctx must be threaded, never context.TODO() in committed code
     - wrapcheck       # errors crossing a package boundary must be wrapped (I-10)
+    - depguard        # only cmd/runner and internal/sandbox/runner may touch Docker
     - gocyclo
     - gocognit
     - nestif
@@ -18,6 +19,21 @@ linters:
           msg: "use log/slog, not fmt.Print* — CLAUDE.md §5.2"
         - pattern: ^os\.Getenv$
           msg: "env vars are read in internal/config only — add a field to config.Config instead"
+    depguard:
+      rules:
+        # The control plane should never touch Docker directly. Only
+        # internal/sandbox/runner and its one caller, cmd/runner, are
+        # allowed to import a Docker client — anywhere else, this fails
+        # the build instead of relying on someone catching it in review.
+        all:
+          files:
+            - "!**/internal/sandbox/runner/**"
+            - "!**/cmd/runner/**"
+          deny:
+            - pkg: github.com/moby/moby/client
+              desc: "Docker client access is confined to internal/sandbox/runner and cmd/runner"
+            - pkg: github.com/docker/docker/client
+              desc: "Docker client access is confined to internal/sandbox/runner and cmd/runner"
     gocyclo:
       min-complexity: 10
     gocognit:
@@ -49,6 +65,17 @@ linters:
       # pattern (see internal/queue/crash_recovery_test.go). fmt.Print* is
       # still banned in tests; only this one rule is test-exempt.
       - path: _test\.go
+        linters:
+          - forbidigo
+        text: "os\\.Getenv"
+      # Every cmd/*/main.go's job is just flag/env parsing and wiring up
+      # its dependencies, nothing else. cmd/anvil happens to use
+      # internal/config to centralize its env reads, but cmd/runner is a
+      # separately deployed binary with its own, unrelated settings
+      # (ANVIL_RUNNER_ADDR, ANVIL_SANDBOX_IMAGE) — sharing one Config
+      # struct across two independently deployed processes would tie
+      # their settings together for no real benefit.
+      - path: cmd/runner/main\.go
         linters:
           - forbidigo
         text: "os\\.Getenv"

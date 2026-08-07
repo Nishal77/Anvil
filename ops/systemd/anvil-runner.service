@@ -1,0 +1,33 @@
+[Unit]
+Description=Anvil Sandbox Runner
+Documentation=https://github.com/anvil-dev/anvil
+After=docker.service
+Requires=docker.service
+
+[Service]
+# The Runner is the only process on this host allowed to touch the
+# Docker socket. It still runs as its own restricted user, not root —
+# access to /var/run/docker.sock comes from group membership (the
+# anvil-runner user must belong to the `docker` group), not from
+# running as root.
+User=anvil-runner
+Group=anvil-runner
+
+Environment=ANVIL_RUNNER_ADDR=127.0.0.1:9090
+Environment=ANVIL_SANDBOX_IMAGE=anvil/workspace@sha256:REPLACE_WITH_PINNED_DIGEST
+ExecStart=/usr/local/bin/anvil-runner
+
+Restart=always
+RestartSec=2s
+
+# Extra protection on top of group-based docker.sock access: this unit
+# gets no more permissions than it needs, and can't gain new ones even if
+# the Runner binary itself had a bug that let an attacker try.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/run/docker.sock
+
+[Install]
+WantedBy=multi-user.target
