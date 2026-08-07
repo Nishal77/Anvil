@@ -1,0 +1,33 @@
+# Build artifacts
+/bin/
+*.test
+*.out
+coverage.out
+coverage.html
+
+# Go
+/vendor/
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+
+# Web
+web/node_modules/
+web/.next/
+web/dist/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Local dev artifacts
+/tmp/
+*.log
+
+# Planning docs — kept locally, not tracked
+/specs/
+/docs/

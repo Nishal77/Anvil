@@ -1,0 +1,32 @@
+version: "2"
+
+linters:
+  enable:
+    - forbidigo     # bans fmt.Println/Print — log/slog only (CLAUDE.md §5.2)
+    - contextcheck   # ctx must be threaded, never context.TODO() in committed code
+    - wrapcheck       # errors crossing a package boundary must be wrapped (I-10)
+    - gocyclo
+    - gocognit
+    - nestif
+    - errcheck
+    - unused
+    - staticcheck
+  settings:
+    forbidigo:
+      forbid:
+        - pattern: ^fmt\.Print.*$
+          msg: "use log/slog, not fmt.Print* — CLAUDE.md §5.2"
+    gocyclo:
+      min-complexity: 10
+    gocognit:
+      min-complexity: 15
+    nestif:
+      min-complexity: 3
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
+# Import-graph boundary enforcement (CLAUDE.md PK5) is not expressible as a
+# golangci-lint rule and is checked instead by scripts/check-invariants.sh,
+# run via `make check-invariants`.
