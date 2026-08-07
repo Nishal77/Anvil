@@ -13,13 +13,14 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      # Pinned, not "latest": golangci-lint-action@v6's "latest" resolves to
-      # the newest v1.x release, which can be built with an older Go than
-      # go.mod targets and then refuses to run ("the Go language version
-      # used to build golangci-lint is lower than the targeted Go version").
-      # v2.12.2 matches the version used in local development.
+      # golangci-lint-action@v6 only supports golangci-lint v1.x — pinning
+      # to a v2.x version string fails outright ("golangci-lint v2 is not
+      # supported by golangci-lint-action v6, you must update to
+      # golangci-lint-action v7"). This repo's .golangci.yml is a v2-schema
+      # config (version: "2", linters.exclusions.rules), which v1 cannot
+      # parse either way — v7 of the action is required, not optional.
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v7
         with:
           version: v2.12.2
 
