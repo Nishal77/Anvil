@@ -10,15 +10,16 @@ import (
 	"golang.org/x/crypto/argon2"
 )
 
-// Argon2id parameters — OWASP's minimum recommended baseline (memory=19
-// MiB, iterations=2, parallelism=1). Not specified by the PRD; see
+// Argon2id parameters — RFC 9106 §4's second recommended option (for when
+// less memory is available than the first recommendation): t=3, m=64 MiB,
+// p=4. Not specified by the PRD; see
 // specs/phase-1-skeleton/week-01-foundations.md Open Questions.
 const (
-	argon2Memory      = 19 * 1024 // KiB
-	argon2Iterations  = 2
-	argon2Parallelism = 1
+	argon2Memory      = 64 * 1024 // KiB
+	argon2Iterations  = 3
+	argon2Parallelism = 4
 	argon2KeyLen      = 32
-	argon2SaltLen     = 16
+	argon2SaltLen     = 32
 )
 
 // hashPassword returns an encoded Argon2id hash of password, in the form
