@@ -42,6 +42,16 @@ linters:
       - path: internal/config/config\.go
         linters:
           - forbidigo
+      # The os.Getenv ban is a production-code rule (env vars flow through
+      # config.Config, not scattered os.Getenv calls). It was never meant
+      # to reach test files, which legitimately use env vars to control a
+      # re-exec'd subprocess — the standard Go os/exec "TestHelperProcess"
+      # pattern (see internal/queue/crash_recovery_test.go). fmt.Print* is
+      # still banned in tests; only this one rule is test-exempt.
+      - path: _test\.go
+        linters:
+          - forbidigo
+        text: "os\\.Getenv"
 
 issues:
   max-issues-per-linter: 0
