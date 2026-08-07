@@ -18,7 +18,10 @@ import (
 // this suite too slow to run on every commit. Each test uses a unique
 // email/token per call so tests can run without truncating shared tables
 // between them.
-var testStore *Store
+var (
+	testStore *Store
+	testDSN   string
+)
 
 func TestMain(m *testing.M) {
 	os.Exit(runTestMain(m))
@@ -65,6 +68,7 @@ func runTestMain(m *testing.M) int {
 	}
 
 	testStore = store
+	testDSN = connStr
 	return m.Run()
 }
 
@@ -203,5 +207,40 @@ func TestStore_RevokeRefreshToken_MarksRevokedAndIsIdempotent(t *testing.T) {
 	}
 	if !got.RevokedAt.Equal(firstRevokedAt) {
 		t.Errorf("second RevokeRefreshToken() changed revoked_at: %v -> %v", firstRevokedAt, *got.RevokedAt)
+	}
+}
+
+func TestStore_Close_ReleasesPoolConnections(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	store, err := New(ctx, testDSN, 5)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	if err := store.Ping(ctx); err != nil {
+		t.Fatalf("Ping() before Close() error: %v", err)
+	}
+
+	store.Close()
+
+	if err := store.Ping(ctx); err == nil {
+		t.Error("Ping() after Close() succeeded, want an error — the pool did not actually close")
+	}
+}
+
+func TestStore_New_HonoursDatabaseMaxConns(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	const wantMaxConns = 3
+
+	store, err := New(ctx, testDSN, wantMaxConns)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	defer store.Close()
+
+	if got := store.pool.Stat().MaxConns(); got != wantMaxConns {
+		t.Errorf("pool MaxConns = %d, want %d (DATABASE_MAX_CONNS not honoured)", got, wantMaxConns)
 	}
 }
