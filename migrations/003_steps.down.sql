@@ -1,0 +1,2 @@
+DROP TABLE IF EXISTS steps;
+DROP TYPE IF EXISTS step_status;
