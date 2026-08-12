@@ -24,30 +24,7 @@ func TestDockerCreateOpts_SEC001Flags(t *testing.T) {
 	}
 	t.Parallel()
 
-	docker, err := client.New(client.FromEnv)
-	if err != nil {
-		t.Fatalf("construct docker client: %v", err)
-	}
-	t.Cleanup(func() {
-		if err := docker.Close(); err != nil {
-			t.Errorf("cleanup: close docker client: %v", err)
-		}
-	})
-
-	ctx := context.Background()
-	if err := ensureSandboxNetwork(ctx, docker); err != nil {
-		t.Fatalf("ensure sandbox network: %v", err)
-	}
-
-	containerID, err := createContainer(ctx, docker, testImage)
-	if err != nil {
-		t.Fatalf("create container: %v", err)
-	}
-	t.Cleanup(func() {
-		if err := destroyContainer(context.Background(), docker, containerID); err != nil {
-			t.Errorf("cleanup: destroy container: %v", err)
-		}
-	})
+	docker, ctx, containerID := newTestContainer(t)
 
 	inspect, err := docker.ContainerInspect(ctx, containerID, client.ContainerInspectOptions{})
 	if err != nil {
@@ -132,6 +109,82 @@ var sec001FlagChecks = []struct {
 		}
 		return ""
 	}},
+}
+
+// TestCreateContainer_WorkspaceIsWritableBySandboxUser is a regression
+// test for a real bug: Docker only gives its special world-writable 1777
+// default to the exact path /tmp. A tmpfs mounted anywhere else —
+// /workspace included — comes back owned by root, mode 0755, which the
+// non-root sandbox user can't write into at all. Caught by hand running
+// `mkdir /workspace/x` inside a real container and getting "Permission
+// denied"; asserting the container's inspect output alone would not have
+// caught this, since the bug was in what value to put in the Tmpfs
+// option string, not in whether one was set at all.
+func TestCreateContainer_WorkspaceIsWritableBySandboxUser(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires a real Docker daemon; skipped in -short")
+	}
+	t.Parallel()
+
+	docker, ctx, containerID := newTestContainer(t)
+
+	result, err := runAndWait(ctx, docker, containerID, "mkdir", "-p", "/workspace/app")
+	if err != nil {
+		t.Fatalf("exec mkdir: %v", err)
+	}
+	if result.ExitCode != 0 {
+		t.Errorf("mkdir /workspace/app exited %d, want 0 — the sandbox user cannot write to /workspace", result.ExitCode)
+	}
+}
+
+// newTestContainer builds a Docker client, makes sure the sandbox network
+// exists, and creates one real container from dockerCreateOpts — the
+// setup every test in this file that needs a live container shares.
+func newTestContainer(t *testing.T) (*client.Client, context.Context, string) {
+	t.Helper()
+	docker, err := client.New(client.FromEnv)
+	if err != nil {
+		t.Fatalf("construct docker client: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := docker.Close(); err != nil {
+			t.Errorf("cleanup: close docker client: %v", err)
+		}
+	})
+
+	ctx := context.Background()
+	if err := ensureSandboxNetwork(ctx, docker); err != nil {
+		t.Fatalf("ensure sandbox network: %v", err)
+	}
+
+	containerID, err := createContainer(ctx, docker, testImage)
+	if err != nil {
+		t.Fatalf("create container: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := destroyContainer(context.Background(), docker, containerID); err != nil {
+			t.Errorf("cleanup: destroy container: %v", err)
+		}
+	})
+
+	return docker, ctx, containerID
+}
+
+// runAndWait execs command in containerID and blocks until it finishes,
+// returning its inspect result (exit code included).
+func runAndWait(ctx context.Context, docker *client.Client, containerID string, command ...string) (client.ExecInspectResult, error) {
+	created, err := docker.ExecCreate(ctx, containerID, client.ExecCreateOptions{Cmd: command})
+	if err != nil {
+		return client.ExecInspectResult{}, fmt.Errorf("exec create: %w", err)
+	}
+	if _, err := docker.ExecStart(ctx, created.ID, client.ExecStartOptions{}); err != nil {
+		return client.ExecInspectResult{}, fmt.Errorf("exec start: %w", err)
+	}
+	result, err := docker.ExecInspect(ctx, created.ID, client.ExecInspectOptions{})
+	if err != nil {
+		return client.ExecInspectResult{}, fmt.Errorf("exec inspect: %w", err)
+	}
+	return result, nil
 }
 
 func containsString(haystack []string, needle string) bool {

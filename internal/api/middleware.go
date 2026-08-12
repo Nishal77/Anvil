@@ -8,6 +8,35 @@ import (
 	"github.com/google/uuid"
 )
 
+// cors lets the web frontend, served from a different origin in dev
+// (localhost:3000) and in production, call this API from a browser at
+// all. Browsers refuse cross-origin fetch/EventSource calls without
+// these headers, and preflight a POST that carries an Authorization
+// header with an OPTIONS request this API otherwise has no route for —
+// without this middleware, every browser-originated POST /v1/jobs fails
+// before it even reaches a handler, with nothing more specific than
+// "Failed to fetch" in the browser console. Reflecting the origin instead
+// of a fixed one keeps this working across dev and prod without a config
+// value to keep in sync; safe here since auth is a bearer token in a
+// header, never a cookie, so there's no cross-site request forgery
+// surface this could open up.
+func cors(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if origin := r.Header.Get("Origin"); origin != "" {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Vary", "Origin")
+		}
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 type traceIDKey struct{}
 
 // traceIDFromContext returns the trace ID stashed by the traceID
@@ -71,21 +100,51 @@ type verifier interface {
 func requireAuth(v verifier) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			const prefix = "Bearer "
-			header := r.Header.Get("Authorization")
-			if len(header) <= len(prefix) || header[:len(prefix)] != prefix {
+			token, ok := bearerToken(r)
+			if !ok {
 				writeInvalidCredentials(w, r)
 				return
 			}
-
-			userID, err := v.VerifyAccessToken(header[len(prefix):])
-			if err != nil {
-				writeInvalidCredentials(w, r)
-				return
-			}
-
-			ctx := context.WithValue(r.Context(), authenticatedUserKey{}, userID)
-			next.ServeHTTP(w, r.WithContext(ctx))
+			authenticate(w, r, next, v, token)
 		})
 	}
+}
+
+// requireAuthSSE is requireAuth's counterpart for the one route a native
+// browser EventSource has to hit: EventSource can't set an Authorization
+// header at all, so this also accepts the token as ?access_token=. Every
+// other route stays header-only.
+func requireAuthSSE(v verifier) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			token, ok := bearerToken(r)
+			if !ok {
+				token = r.URL.Query().Get("access_token")
+			}
+			if token == "" {
+				writeInvalidCredentials(w, r)
+				return
+			}
+			authenticate(w, r, next, v, token)
+		})
+	}
+}
+
+func bearerToken(r *http.Request) (string, bool) {
+	const prefix = "Bearer "
+	header := r.Header.Get("Authorization")
+	if len(header) <= len(prefix) || header[:len(prefix)] != prefix {
+		return "", false
+	}
+	return header[len(prefix):], true
+}
+
+func authenticate(w http.ResponseWriter, r *http.Request, next http.Handler, v verifier, token string) {
+	userID, err := v.VerifyAccessToken(token)
+	if err != nil {
+		writeInvalidCredentials(w, r)
+		return
+	}
+	ctx := context.WithValue(r.Context(), authenticatedUserKey{}, userID)
+	next.ServeHTTP(w, r.WithContext(ctx))
 }

@@ -1,0 +1,1 @@
+Implement FizzBuzz in Go, in package main, as a function FizzBuzz(n int) string that returns "Fizz" for multiples of 3, "Buzz" for multiples of 5, "FizzBuzz" for multiples of both, and the number itself (as a string) otherwise. Write a table-driven test covering at least n = 3, 5, 15, and 7. Include a go.mod file declaring module "fizzbuzz" and go 1.23.

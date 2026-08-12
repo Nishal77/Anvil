@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"fmt"
 	"strconv"
 
 	"github.com/moby/moby/api/types/container"
@@ -18,7 +19,6 @@ const (
 	sandboxMemoryBytes  = 1 << 30       // 1 GiB
 	sandboxNanoCPUs     = 1_000_000_000 // 1.0 CPU
 	sandboxUlimitNofile = 1024
-	sandboxTmpfsBytes   = "size=512m" // workspace disk cap
 )
 
 // dockerCreateOpts returns the full hardened container configuration:
@@ -41,8 +41,14 @@ func dockerCreateOpts(image string) (*container.Config, *container.HostConfig, *
 		SecurityOpt:    []string{"no-new-privileges:true"},
 		ReadonlyRootfs: true,
 		Tmpfs: map[string]string{
-			"/workspace": sandboxTmpfsBytes,
-			"/tmp":       sandboxTmpfsBytes,
+			// Docker only gives its special world-writable 1777 default
+			// to the exact path /tmp — a tmpfs mounted anywhere else,
+			// /workspace included, comes back owned by root, mode 0755,
+			// which the non-root sandbox user can't write into at all.
+			// Verified directly: `mkdir /workspace/x` failed with
+			// "Permission denied" until uid/gid/mode were added here.
+			"/workspace": fmt.Sprintf("size=512m,uid=%d,gid=%d,mode=0755", sandboxUID, sandboxUID),
+			"/tmp":       "size=512m",
 		},
 		NetworkMode: container.NetworkMode(sandboxNetwork),
 		Resources: container.Resources{

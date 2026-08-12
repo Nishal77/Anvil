@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/anvil-dev/anvil/internal/auth"
 )
@@ -26,10 +27,14 @@ type authService interface {
 
 // Config configures a Server.
 type Config struct {
-	Addr   string
-	Auth   authService
-	Store  pinger
-	Logger *slog.Logger
+	Addr       string
+	Auth       authService
+	Store      pinger
+	Pool       *pgxpool.Pool // jobs and steps live in queue's tables, read/written directly
+	Hub        eventHub
+	EventStore eventStore
+	Publisher  eventPublisher
+	Logger     *slog.Logger
 }
 
 func (c Config) validate() error {
@@ -41,6 +46,18 @@ func (c Config) validate() error {
 	}
 	if c.Store == nil {
 		return errors.New("api: config: Store is required")
+	}
+	if c.Pool == nil {
+		return errors.New("api: config: Pool is required")
+	}
+	if c.Hub == nil {
+		return errors.New("api: config: Hub is required")
+	}
+	if c.EventStore == nil {
+		return errors.New("api: config: EventStore is required")
+	}
+	if c.Publisher == nil {
+		return errors.New("api: config: Publisher is required")
 	}
 	if c.Logger == nil {
 		return errors.New("api: config: Logger is required")
@@ -55,6 +72,10 @@ type Server struct {
 	httpServer *http.Server
 	auth       authService
 	store      pinger
+	pool       *pgxpool.Pool
+	hub        eventHub
+	eventStore eventStore
+	publisher  eventPublisher
 	log        *slog.Logger
 }
 
@@ -65,9 +86,13 @@ func New(cfg Config) (*Server, error) {
 	}
 
 	s := &Server{
-		auth:  cfg.Auth,
-		store: cfg.Store,
-		log:   cfg.Logger,
+		auth:       cfg.Auth,
+		store:      cfg.Store,
+		pool:       cfg.Pool,
+		hub:        cfg.Hub,
+		eventStore: cfg.EventStore,
+		publisher:  cfg.Publisher,
+		log:        cfg.Logger,
 	}
 
 	mux := http.NewServeMux()
@@ -75,10 +100,14 @@ func New(cfg Config) (*Server, error) {
 	mux.HandleFunc("POST /auth/login", s.handleLogin)
 	mux.HandleFunc("POST /auth/refresh", s.handleAuthRefresh)
 	mux.Handle("POST /auth/logout", requireAuth(cfg.Auth)(http.HandlerFunc(s.handleLogout)))
+	mux.Handle("POST /v1/jobs", requireAuth(cfg.Auth)(http.HandlerFunc(s.handleCreateJob)))
+	mux.Handle("GET /v1/jobs", requireAuth(cfg.Auth)(http.HandlerFunc(s.handleListJobs)))
+	mux.Handle("GET /v1/jobs/{id}", requireAuth(cfg.Auth)(http.HandlerFunc(s.handleGetJob)))
+	mux.Handle("GET /v1/jobs/{id}/events", requireAuthSSE(cfg.Auth)(http.HandlerFunc(s.handleJobEvents)))
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /readyz", s.handleReadyz)
 
-	handler := traceID(recoverPanic(cfg.Logger)(mux))
+	handler := cors(traceID(recoverPanic(cfg.Logger)(mux)))
 
 	s.httpServer = &http.Server{
 		Addr:    cfg.Addr,

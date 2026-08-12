@@ -17,6 +17,9 @@ var ErrNoWork = errors.New("no claimable work")
 // all in-flight work immediately and MUST NOT write further state.
 var ErrLeaseLost = errors.New("lease lost")
 
+// ErrNotFound indicates the requested job does not exist.
+var ErrNotFound = errors.New("job not found")
+
 // IllegalTransitionError reports an attempt to move a job between states
 // the lifecycle in PRD §13.1 does not permit. Always a caller bug; never
 // retried.

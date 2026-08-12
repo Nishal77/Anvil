@@ -56,15 +56,23 @@ func runTestMain(m *testing.M) int {
 	defer store.Close()
 
 	// go test sets the working directory to this package's directory, so
-	// this path is relative to internal/storage/.
-	migration, err := os.ReadFile("../../migrations/001_users.up.sql")
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "storage tests: read migration:", err)
-		return 1
-	}
-	if _, err := store.pool.Exec(ctx, string(migration)); err != nil {
-		fmt.Fprintln(os.Stderr, "storage tests: apply migration:", err)
-		return 1
+	// these paths are relative to internal/storage/. Only the migrations
+	// this package's tests actually touch: users (auth), jobs (the FK
+	// target for job_events), and events itself.
+	for _, path := range []string{
+		"../../migrations/001_users.up.sql",
+		"../../migrations/002_jobs.up.sql",
+		"../../migrations/005_events.up.sql",
+	} {
+		migration, err := os.ReadFile(path)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "storage tests: read migration:", err)
+			return 1
+		}
+		if _, err := store.pool.Exec(ctx, string(migration)); err != nil {
+			fmt.Fprintln(os.Stderr, "storage tests: apply migration:", err)
+			return 1
+		}
 	}
 
 	testStore = store

@@ -1,0 +1,39 @@
+---
+version: 2
+interactions:
+    - id: 0
+      request:
+        proto: HTTP/1.1
+        proto_major: 1
+        proto_minor: 1
+        content_length: 0
+        transfer_encoding: []
+        trailer: {}
+        host: generativelanguage.googleapis.com
+        remote_addr: ""
+        request_uri: ""
+        body: ""
+        form: {}
+        headers:
+            # Placeholder — scrub the real key before committing a
+            # cassette recorded against the live API.
+            X-Goog-Api-Key:
+                - REDACTED
+        url: https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent
+        method: POST
+      response:
+        proto: HTTP/1.1
+        proto_major: 1
+        proto_minor: 1
+        transfer_encoding: []
+        trailer: {}
+        content_length: -1
+        uncompressed: false
+        body: |
+            {"candidates":[{"content":{"parts":[{"text":"hello from gemini"}],"role":"model"},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":8,"candidatesTokenCount":4,"totalTokenCount":12}}
+        headers:
+            Content-Type:
+                - application/json
+        status: 200 OK
+        code: 200
+        duration: 0s

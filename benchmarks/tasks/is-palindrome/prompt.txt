@@ -1,0 +1,1 @@
+Implement a Go function IsPalindrome(s string) bool in package main that reports whether s reads the same forwards and backwards. Write a test with at least 3 cases, including the empty string. Include a go.mod file declaring module "ispalindrome" and go 1.23.

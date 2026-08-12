@@ -1,0 +1,1 @@
+Implement a Go function Reverse(s string) string in package main that returns s with its characters reversed, correctly handling the empty string. Write a test with at least 3 cases. Include a go.mod file declaring module "reversestring" and go 1.23.

@@ -1,0 +1,41 @@
+---
+version: 2
+interactions:
+    - id: 0
+      request:
+        proto: HTTP/1.1
+        proto_major: 1
+        proto_minor: 1
+        content_length: 0
+        transfer_encoding: []
+        trailer: {}
+        host: api.anthropic.com
+        remote_addr: ""
+        request_uri: ""
+        body: ""
+        form: {}
+        headers:
+            # Recorded cassettes must never contain a real key — this
+            # value is a placeholder scrubbed before commit, per
+            # BUILD-PLAN W5 ("go-vcr cassettes committed with API keys
+            # in the headers... scrub before the first commit").
+            X-Api-Key:
+                - REDACTED
+        url: https://api.anthropic.com/v1/messages
+        method: POST
+      response:
+        proto: HTTP/1.1
+        proto_major: 1
+        proto_minor: 1
+        transfer_encoding: []
+        trailer: {}
+        content_length: -1
+        uncompressed: false
+        body: |
+            {"id":"msg_fixture01","type":"message","role":"assistant","model":"claude-haiku-4-5","content":[{"type":"text","text":"hello from claude"}],"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":5,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}
+        headers:
+            Content-Type:
+                - application/json
+        status: 200 OK
+        code: 200
+        duration: 0s

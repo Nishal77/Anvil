@@ -62,10 +62,14 @@ func validTokenPair() auth.TokenPair {
 func newTestServer(t *testing.T, a *fakeAuth, p *fakePinger) *Server {
 	t.Helper()
 	srv, err := New(Config{
-		Addr:   ":0",
-		Auth:   a,
-		Store:  p,
-		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Addr:       ":0",
+		Auth:       a,
+		Store:      p,
+		Pool:       testPool,
+		Hub:        &fakeHub{},
+		EventStore: &fakeEventStore{},
+		Publisher:  &fakePublisher{},
+		Logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	if err != nil {
 		t.Fatalf("New() error: %v", err)
@@ -139,10 +143,14 @@ func TestServer_UnexpectedError_IsLoggedNotSwallowed(t *testing.T) {
 		},
 	}
 	srv, err := New(Config{
-		Addr:   ":0",
-		Auth:   a,
-		Store:  &fakePinger{},
-		Logger: slog.New(slog.NewTextHandler(&logs, nil)),
+		Addr:       ":0",
+		Auth:       a,
+		Store:      &fakePinger{},
+		Pool:       testPool,
+		Hub:        &fakeHub{},
+		EventStore: &fakeEventStore{},
+		Publisher:  &fakePublisher{},
+		Logger:     slog.New(slog.NewTextHandler(&logs, nil)),
 	})
 	if err != nil {
 		t.Fatalf("New() error: %v", err)
@@ -288,5 +296,41 @@ func TestServer_Logout_PassesVerifiedCallerIDNotBody(t *testing.T) {
 
 	if gotCallerID != verifiedUserID {
 		t.Errorf("Logout received caller ID %v, want the Bearer-verified ID %v — logout must be scoped to the authenticated caller, not trust the request body", gotCallerID, verifiedUserID)
+	}
+}
+
+func TestServer_CORS_PreflightSucceedsForBrowserOrigin(t *testing.T) {
+	t.Parallel()
+	srv := newTestServer(t, &fakeAuth{}, &fakePinger{})
+
+	req := httptest.NewRequest(http.MethodOptions, "/v1/jobs", nil)
+	req.Header.Set("Origin", "http://localhost:3000")
+	req.Header.Set("Access-Control-Request-Method", "POST")
+	req.Header.Set("Access-Control-Request-Headers", "authorization,content-type")
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("preflight status = %d, want 204", rec.Code)
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "http://localhost:3000" {
+		t.Errorf("Access-Control-Allow-Origin = %q, want the request's Origin echoed back", got)
+	}
+	if !strings.Contains(rec.Header().Get("Access-Control-Allow-Headers"), "Authorization") {
+		t.Errorf("Access-Control-Allow-Headers = %q, want it to allow Authorization", rec.Header().Get("Access-Control-Allow-Headers"))
+	}
+}
+
+func TestServer_CORS_RealResponseCarriesAllowOrigin(t *testing.T) {
+	t.Parallel()
+	srv := newTestServer(t, &fakeAuth{}, &fakePinger{})
+
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	req.Header.Set("Origin", "http://localhost:3000")
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "http://localhost:3000" {
+		t.Errorf("Access-Control-Allow-Origin = %q, want the request's Origin echoed back on a normal response too", got)
 	}
 }

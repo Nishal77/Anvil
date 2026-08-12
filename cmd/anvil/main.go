@@ -11,9 +11,15 @@ import (
 	"os/signal"
 	"syscall"
 
+	"golang.org/x/sync/errgroup"
+
 	"github.com/anvil-dev/anvil/internal/api"
 	"github.com/anvil-dev/anvil/internal/auth"
 	"github.com/anvil-dev/anvil/internal/config"
+	"github.com/anvil-dev/anvil/internal/events"
+	"github.com/anvil-dev/anvil/internal/executor"
+	"github.com/anvil-dev/anvil/internal/queue"
+	"github.com/anvil-dev/anvil/internal/sandbox"
 	"github.com/anvil-dev/anvil/internal/storage"
 	"github.com/anvil-dev/anvil/internal/telemetry"
 	"github.com/anvil-dev/anvil/internal/version"
@@ -44,14 +50,55 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
-
 	log := telemetry.NewLogger(os.Stdout, "api")
 
+	cp, err := wireControlPlane(ctx, cfg, log)
+	if err != nil {
+		return err
+	}
+	defer cp.close()
+
+	// Server, Dispatcher, and Hub each own their own goroutines and all
+	// stop cleanly on ctx cancellation; if any one of them returns an
+	// error, the others are cancelled too rather than left running
+	// half the control plane.
+	g, gctx := errgroup.WithContext(ctx)
+	g.Go(func() error { return cp.hub.Run(gctx, cp.redis) })
+	g.Go(func() error { return cp.dispatcher.Run(gctx) })
+	g.Go(func() error {
+		log.Info("starting", slog.String("addr", cfg.HTTPAddr))
+		return cp.server.Run(gctx)
+	})
+
+	if err := g.Wait(); err != nil {
+		return fmt.Errorf("run control plane: %w", err)
+	}
+	return nil
+}
+
+// controlPlane holds every long-lived component run wires together and
+// then hands to the errgroup — kept as one struct so run() itself stays
+// under the complexity limit CI enforces on every function.
+type controlPlane struct {
+	store      *storage.Store
+	redis      *events.RedisClient
+	dispatcher *queue.Dispatcher
+	hub        *events.Hub
+	server     *api.Server
+}
+
+func (cp *controlPlane) close() {
+	_ = cp.redis.Close()
+	cp.store.Close()
+}
+
+func wireControlPlane(ctx context.Context, cfg config.Config, log *slog.Logger) (*controlPlane, error) {
 	store, err := storage.New(ctx, cfg.DatabaseURL, cfg.DatabaseMaxConns)
 	if err != nil {
-		return fmt.Errorf("connect to database: %w", err)
+		return nil, fmt.Errorf("connect to database: %w", err)
 	}
-	defer store.Close()
+
+	redisClient := events.NewRedisClient(cfg.RedisAddr)
 
 	authSvc, err := auth.New(auth.Config{
 		Store:           store,
@@ -61,22 +108,56 @@ func run() error {
 		RefreshTokenTTL: cfg.RefreshTokenTTL,
 	})
 	if err != nil {
-		return fmt.Errorf("construct auth service: %w", err)
+		return nil, fmt.Errorf("construct auth service: %w", err)
+	}
+
+	publisher, err := events.New(events.Config{Store: store, Redis: redisClient, Logger: log})
+	if err != nil {
+		return nil, fmt.Errorf("construct event publisher: %w", err)
+	}
+
+	hub, err := events.NewHub(events.HubConfig{Logger: log})
+	if err != nil {
+		return nil, fmt.Errorf("construct event hub: %w", err)
+	}
+
+	sandboxClient, err := sandbox.New(sandbox.Config{RunnerAddr: cfg.RunnerAddr, Logger: log})
+	if err != nil {
+		return nil, fmt.Errorf("construct sandbox client: %w", err)
+	}
+
+	exec, err := executor.New(executor.Config{
+		Sandbox:   sandboxClient,
+		Publisher: publisher,
+		Pool:      store.Pool(),
+		Logger:    log,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("construct executor: %w", err)
+	}
+
+	dispatcher, err := queue.New(queue.Config{
+		Pool:    store.Pool(),
+		Logger:  log,
+		RunStep: exec.RunStep,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("construct dispatcher: %w", err)
 	}
 
 	server, err := api.New(api.Config{
-		Addr:   cfg.HTTPAddr,
-		Auth:   authSvc,
-		Store:  store,
-		Logger: log,
+		Addr:       cfg.HTTPAddr,
+		Auth:       authSvc,
+		Store:      store,
+		Pool:       store.Pool(),
+		Hub:        hub,
+		EventStore: store,
+		Publisher:  publisher,
+		Logger:     log,
 	})
 	if err != nil {
-		return fmt.Errorf("construct api server: %w", err)
+		return nil, fmt.Errorf("construct api server: %w", err)
 	}
 
-	log.Info("starting", slog.String("addr", cfg.HTTPAddr))
-	if err := server.Run(ctx); err != nil {
-		return fmt.Errorf("run server: %w", err)
-	}
-	return nil
+	return &controlPlane{store: store, redis: redisClient, dispatcher: dispatcher, hub: hub, server: server}, nil
 }

@@ -1,0 +1,1 @@
+Create a Go program in package main with a function Greet() that returns the string "Hello, World!". main() should print the result of Greet() to stdout. Write a test file that verifies Greet() returns exactly "Hello, World!". Include a go.mod file declaring module "helloworld" and go 1.23.

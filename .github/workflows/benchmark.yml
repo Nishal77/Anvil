@@ -1,0 +1,53 @@
+name: benchmark
+
+# Nightly only — never on push or pull_request. This suite calls real
+# LLM APIs and spends real money (CLAUDE.md §5, PRD §20.5); running it
+# in PR CI would bill every push, including force-pushes and rebases.
+on:
+  schedule:
+    - cron: "0 7 * * *" # 07:00 UTC daily
+  workflow_dispatch: {}
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: build sandbox image
+        run: docker build -t anvil/workspace:test images/workspace
+
+      - name: start runner
+        env:
+          ANVIL_RUNNER_ADDR: 127.0.0.1:9090
+          ANVIL_SANDBOX_IMAGE: anvil/workspace:test
+        run: |
+          go run ./cmd/runner &
+          # The Runner has no /healthz (SEC-002: it's the one process
+          # touching Docker, kept deliberately minimal) — any response
+          # at all, even the mux's 404 on an unmapped path, proves the
+          # listener is accepting connections.
+          for i in $(seq 1 30); do
+            curl -s -o /dev/null http://127.0.0.1:9090/ && exit 0
+            sleep 1
+          done
+          echo "runner never started listening" >&2
+          exit 1
+
+      - name: run benchmark suite
+        env:
+          ANVIL_RUNNER_URL: http://127.0.0.1:9090
+          ANVIL_GEMINI_API_KEY: ${{ secrets.ANVIL_GEMINI_API_KEY }}
+          ANVIL_ANTHROPIC_API_KEY: ${{ secrets.ANVIL_ANTHROPIC_API_KEY }}
+        run: make bench
+
+      - name: commit updated results
+        run: |
+          git config user.name "anvil-bench-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add benchmarks/results.md
+          git diff --cached --quiet || git commit -m "chore(bench): nightly benchmark run ($(date -u +%Y-%m-%d))"
+          git push
