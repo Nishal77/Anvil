@@ -137,6 +137,39 @@ func TestCreateContainer_WorkspaceIsWritableBySandboxUser(t *testing.T) {
 	}
 }
 
+// TestCreateContainer_WorkspaceAndTmpAreExecutable is a regression test
+// for a real bug found running Week 6's executor loop against a real
+// LLM: Docker's --tmpfs default is noexec. `go test` failed with
+// "fork/exec ...: permission denied" trying to run its own compiled
+// test binary out of /tmp, and the same would happen for any binary an
+// agent writes and tries to run out of /workspace — defeating the
+// sandbox's whole purpose. Asserting the container's inspect output
+// alone would not catch this: HostConfig has no separate "exec" field,
+// it lives inside the Tmpfs option string, same class of bug as the
+// writability regression above.
+func TestCreateContainer_WorkspaceAndTmpAreExecutable(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires a real Docker daemon; skipped in -short")
+	}
+	t.Parallel()
+
+	docker, ctx, containerID := newTestContainer(t)
+
+	for _, dir := range []string{"/workspace", "/tmp"} {
+		script := dir + "/exec_test.sh"
+		if _, err := runAndWait(ctx, docker, containerID, "sh", "-c", fmt.Sprintf(`printf '#!/bin/sh\necho ok\n' > %s && chmod +x %s`, script, script)); err != nil {
+			t.Fatalf("write script in %s: %v", dir, err)
+		}
+		result, err := runAndWait(ctx, docker, containerID, script)
+		if err != nil {
+			t.Fatalf("exec script in %s: %v", dir, err)
+		}
+		if result.ExitCode != 0 {
+			t.Errorf("executing a script written to %s exited %d, want 0 — noexec is still set on this tmpfs", dir, result.ExitCode)
+		}
+	}
+}
+
 // newTestContainer builds a Docker client, makes sure the sandbox network
 // exists, and creates one real container from dockerCreateOpts — the
 // setup every test in this file that needs a live container shares.

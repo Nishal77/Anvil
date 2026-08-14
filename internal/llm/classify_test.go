@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/openai/openai-go/v2"
 	"google.golang.org/genai"
 )
 
@@ -54,6 +55,29 @@ func TestClassifyGeminiError(t *testing.T) {
 			got := classifyGeminiError(tt.err)
 			if !errors.Is(got, tt.want) {
 				t.Fatalf("classifyGeminiError(%v) = %v, want wrapping %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestClassifyOpenAIError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want error
+	}{
+		{"429 is rate limited", &openai.Error{StatusCode: 429}, ErrRateLimited},
+		{"500 is unavailable", &openai.Error{StatusCode: 500}, ErrProviderUnavailable},
+		{"503 is unavailable", &openai.Error{StatusCode: 503}, ErrProviderUnavailable},
+		{"400 is fatal", &openai.Error{StatusCode: 400}, ErrProviderFatal},
+		{"401 is fatal", &openai.Error{StatusCode: 401}, ErrProviderFatal},
+		{"connection error is unavailable", fmt.Errorf("dial tcp: connection refused"), ErrProviderUnavailable},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := classifyOpenAIError(tt.err)
+			if !errors.Is(got, tt.want) {
+				t.Fatalf("classifyOpenAIError(%v) = %v, want wrapping %v", tt.err, got, tt.want)
 			}
 		})
 	}

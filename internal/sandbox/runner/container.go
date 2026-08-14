@@ -34,6 +34,13 @@ func dockerCreateOpts(image string) (*container.Config, *container.HostConfig, *
 		User:       strconv.Itoa(sandboxUID),
 		WorkingDir: "/workspace",
 		Cmd:        []string{"sleep", "infinity"}, // container stays alive; exec runs actual commands
+		// HOME=/workspace: the image sets no HOME for the non-root
+		// sandbox user, so it defaults to "/" — read-only. Every
+		// language toolchain that caches under $HOME (go build,
+		// npm, pip) fails outright without this. Not a credential
+		// (SEC-020 is unaffected), just a writable home inside the
+		// existing /workspace tmpfs.
+		Env: []string{"HOME=/workspace"},
 	}
 
 	hostCfg := &container.HostConfig{
@@ -47,8 +54,19 @@ func dockerCreateOpts(image string) (*container.Config, *container.HostConfig, *
 			// which the non-root sandbox user can't write into at all.
 			// Verified directly: `mkdir /workspace/x` failed with
 			// "Permission denied" until uid/gid/mode were added here.
-			"/workspace": fmt.Sprintf("size=512m,uid=%d,gid=%d,mode=0755", sandboxUID, sandboxUID),
-			"/tmp":       "size=512m",
+			//
+			// "exec" on both: Docker's --tmpfs default is noexec, which
+			// silently defeats this whole sandbox's purpose — an agent
+			// whose job is to compile and run code cannot do either from
+			// its own writable directories otherwise. Verified directly:
+			// `go test` failed with "fork/exec ...: permission denied"
+			// on its own build output under /tmp until this was added.
+			// SEC-001's other controls (cap-drop ALL, no-new-privileges,
+			// non-root, network isolation, resource limits) are the
+			// actual containment boundary; noexec here was an unintended
+			// Docker default, not a deliberate part of that boundary.
+			"/workspace": fmt.Sprintf("size=512m,uid=%d,gid=%d,mode=0755,exec", sandboxUID, sandboxUID),
+			"/tmp":       "size=512m,exec",
 		},
 		NetworkMode: container.NetworkMode(sandboxNetwork),
 		Resources: container.Resources{

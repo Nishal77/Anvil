@@ -81,7 +81,7 @@ func fsReadTool(client sandboxClient) Tool {
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
-				"path": {"type": "string"},
+				"path": {"type": "string", "description": "Path relative to the workspace root, e.g. \"app/main.go\" — NOT \"workspace/app/main.go\". An absolute path starting with /workspace also works."},
 				"start_line": {"type": "integer", "minimum": 1},
 				"end_line": {"type": "integer", "minimum": 1}
 			},
@@ -109,7 +109,13 @@ func fsReadTool(client sandboxClient) Tool {
 			if end == 0 {
 				end = 1 << 30
 			}
-			cmd := fmt.Sprintf(`awk 'NR>=%d && NR<=%d {printf "%%6d\t%%s\n", NR, $0}' -- %s`, start, end, shellQuote(resolved))
+			// No "--" before the filename: the image's awk (mawk) does
+			// not treat it as an end-of-options marker the way GNU awk
+			// does and instead tries to open a file literally named
+			// "--", failing every call. Resolved paths are always
+			// absolute (workspaceRoot-rooted), so there is no
+			// leading-dash ambiguity for awk to misparse without it.
+			cmd := fmt.Sprintf(`awk 'NR>=%d && NR<=%d {printf "%%6d\t%%s\n", NR, $0}' %s`, start, end, shellQuote(resolved))
 			res, err := runInSandbox(ctx, client, sandboxID, cmd, fsOpTimeout)
 			if err != nil {
 				return "", err
@@ -129,7 +135,7 @@ func fsWriteTool(client sandboxClient) Tool {
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
-				"path": {"type": "string"},
+				"path": {"type": "string", "description": "Path relative to the workspace root, e.g. \"app/main.go\" — NOT \"workspace/app/main.go\". An absolute path starting with /workspace also works."},
 				"content": {"type": "string"}
 			},
 			"required": ["path", "content"]
@@ -170,7 +176,7 @@ func fsListTool(client sandboxClient) Tool {
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
-				"path": {"type": "string"},
+				"path": {"type": "string", "description": "Path relative to the workspace root, e.g. \"app\" or \".\" — NOT \"workspace/app\". An absolute path starting with /workspace also works."},
 				"depth": {"type": "integer", "minimum": 1, "maximum": 10}
 			},
 			"required": ["path"]
@@ -213,7 +219,7 @@ func fsSearchTool(client sandboxClient) Tool {
 			"type": "object",
 			"properties": {
 				"pattern": {"type": "string"},
-				"path": {"type": "string"}
+				"path": {"type": "string", "description": "Path relative to the workspace root, e.g. \"app\" — NOT \"workspace/app\". Defaults to the workspace root if omitted."}
 			},
 			"required": ["pattern"]
 		}`),

@@ -206,22 +206,27 @@ func wireExecutor(ctx context.Context, cfg config.Config, sandboxClient *sandbox
 	return exec, nil
 }
 
-// wireRouter builds an llm.Router with Gemini primary / Anthropic
+// wireRouter builds an llm.Router with Anthropic primary / OpenAI
 // fallback for TaskExecution — the only task class the Week 6 executor
-// loop issues (TaskPlanning is Week 7's). Budget is the same
-// storageBudget instance the policy engine's rule 6 reads, so both are
-// checking one source of truth, not two budgets that can disagree.
+// loop issues (TaskPlanning is Week 7's). Gemini is appended last,
+// only if configured — it is not required (ANVIL_GEMINI_API_KEY may
+// be left unset). Budget is the same storageBudget instance the
+// policy engine's rule 6 reads, so both are checking one source of
+// truth, not two budgets that can disagree.
 func wireRouter(ctx context.Context, cfg config.Config, budget llm.BudgetStore, spend llm.SpendReader, log *slog.Logger) (*llm.Router, error) {
 	var ladder []llm.Provider
+	if cfg.AnthropicAPIKey != "" {
+		ladder = append(ladder, llm.NewAnthropicProvider(cfg.AnthropicAPIKey, anthropic.ModelClaudeHaiku4_5))
+	}
+	if cfg.OpenAIAPIKey != "" {
+		ladder = append(ladder, llm.NewOpenAIProvider(cfg.OpenAIAPIKey, cfg.OpenAIModel))
+	}
 	if cfg.GeminiAPIKey != "" {
 		provider, err := llm.NewGeminiProvider(ctx, cfg.GeminiAPIKey, cfg.GeminiModel)
 		if err != nil {
 			return nil, fmt.Errorf("configure gemini provider: %w", err)
 		}
 		ladder = append(ladder, provider)
-	}
-	if cfg.AnthropicAPIKey != "" {
-		ladder = append(ladder, llm.NewAnthropicProvider(cfg.AnthropicAPIKey, anthropic.ModelClaudeHaiku4_5))
 	}
 
 	router, err := llm.NewRouter(llm.Config{

@@ -90,21 +90,25 @@ func newBenchRunner(ctx context.Context, cfg config.BenchConfig, log *slog.Logge
 	return runner, nil
 }
 
-// newBenchRouter builds a Router with Gemini primary / Anthropic
+// newBenchRouter builds a Router with Anthropic primary / OpenAI
 // fallback for the PLANNING task class — the only class the
-// benchmark harness uses, per its single-shot design.
+// benchmark harness uses, per its single-shot design. Gemini is
+// appended last, only if configured; it is not required.
 func newBenchRouter(ctx context.Context, cfg config.BenchConfig, log *slog.Logger) (*llm.Router, error) {
 	var ladder []llm.Provider
 
+	if cfg.AnthropicAPIKey != "" {
+		ladder = append(ladder, llm.NewAnthropicProvider(cfg.AnthropicAPIKey, anthropic.ModelClaudeHaiku4_5))
+	}
+	if cfg.OpenAIAPIKey != "" {
+		ladder = append(ladder, llm.NewOpenAIProvider(cfg.OpenAIAPIKey, cfg.OpenAIModel))
+	}
 	if cfg.GeminiAPIKey != "" {
 		provider, err := llm.NewGeminiProvider(ctx, cfg.GeminiAPIKey, cfg.GeminiModel)
 		if err != nil {
 			return nil, fmt.Errorf("configure gemini provider: %w", err)
 		}
 		ladder = append(ladder, provider)
-	}
-	if cfg.AnthropicAPIKey != "" {
-		ladder = append(ladder, llm.NewAnthropicProvider(cfg.AnthropicAPIKey, anthropic.ModelClaudeHaiku4_5))
 	}
 
 	router, err := llm.NewRouter(llm.Config{

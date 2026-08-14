@@ -198,7 +198,15 @@ fi
 # ---------------------------------------------------------------------------
 # Commented-out code (DOC5)
 # ---------------------------------------------------------------------------
-hits=$(go_sources | xargs grep -nE '^[[:space:]]*//[[:space:]]*(if|for|func|return|var |err :?=|switch)\b' 2>/dev/null \
+# "if"/"for"/"switch" collide with ordinary English sentences ("if any
+# is invalid...", "for the same row..."), so those three additionally
+# require a brace or paren somewhere on the line — real commented-out
+# control-flow code has one (`if err != nil {`), prose essentially
+# never does. func/return/var/err:= are narrow enough to skip that
+# extra filter; a period-terminated line is still excluded either way
+# (prose sentences end in one, code doesn't).
+hits=$( { go_sources | xargs grep -nE '^[[:space:]]*//[[:space:]]*(if|for|switch)\b' 2>/dev/null | grep -E '[{(]'; \
+         go_sources | xargs grep -nE '^[[:space:]]*//[[:space:]]*(func|return|var |err :?=)\b' 2>/dev/null; } \
     | grep -vE '\.$' || true)
 if [[ -n "$hits" ]]; then
     fail "DOC5" "commented-out code:

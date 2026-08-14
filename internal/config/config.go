@@ -16,6 +16,7 @@ const (
 	defaultRunnerAddr       = "http://127.0.0.1:9090"
 	minJWTSigningKeyBytes   = 32
 	defaultGeminiModel      = "gemini-2.5-flash"
+	defaultOpenAIModel      = "gpt-4o-mini"
 	defaultMonthlyUSDCap    = 10
 	usdMicrosPerUSD         = 1_000_000
 )
@@ -31,16 +32,20 @@ type Config struct {
 	JWTSigningKey    []byte
 	AccessTokenTTL   time.Duration
 	RefreshTokenTTL  time.Duration
-	GeminiAPIKey     string
-	GeminiModel      string
-	AnthropicAPIKey  string
+	// GeminiAPIKey is optional — Gemini is not required when Anthropic
+	// and/or OpenAI keys are set (see validate).
+	GeminiAPIKey    string
+	GeminiModel     string
+	AnthropicAPIKey string
+	OpenAIAPIKey    string
+	OpenAIModel     string
 	// MonthlyUSDCapMicros is ANVIL_MONTHLY_USD_CAP (whole USD) converted
 	// to micros — FR-034's global spend ceiling.
 	MonthlyUSDCapMicros int64
 }
 
-// LogValue redacts JWTSigningKey so a careless `slog.Any("config", cfg)`
-// can't leak it (CLAUDE.md I-3).
+// LogValue redacts JWTSigningKey and every API key so a careless
+// `slog.Any("config", cfg)` can't leak them (CLAUDE.md I-3).
 func (c Config) LogValue() slog.Value {
 	return slog.GroupValue(
 		slog.String("http_addr", c.HTTPAddr),
@@ -54,6 +59,8 @@ func (c Config) LogValue() slog.Value {
 		slog.Bool("gemini_configured", c.GeminiAPIKey != ""),
 		slog.String("gemini_model", c.GeminiModel),
 		slog.Bool("anthropic_configured", c.AnthropicAPIKey != ""),
+		slog.Bool("openai_configured", c.OpenAIAPIKey != ""),
+		slog.String("openai_model", c.OpenAIModel),
 		slog.Int64("monthly_usd_cap_micros", c.MonthlyUSDCapMicros),
 	)
 }
@@ -73,6 +80,8 @@ func Load() (Config, error) {
 		GeminiAPIKey:        os.Getenv("ANVIL_GEMINI_API_KEY"),
 		GeminiModel:         envOr("ANVIL_GEMINI_MODEL", defaultGeminiModel),
 		AnthropicAPIKey:     os.Getenv("ANVIL_ANTHROPIC_API_KEY"),
+		OpenAIAPIKey:        os.Getenv("ANVIL_OPENAI_API_KEY"),
+		OpenAIModel:         envOr("ANVIL_OPENAI_MODEL", defaultOpenAIModel),
 		MonthlyUSDCapMicros: defaultMonthlyUSDCap * usdMicrosPerUSD,
 	}
 
@@ -111,8 +120,8 @@ func (c Config) validate() error {
 	if c.DatabaseMaxConns <= 0 {
 		return fmt.Errorf("config: DATABASE_MAX_CONNS must be positive, got %d", c.DatabaseMaxConns)
 	}
-	if c.GeminiAPIKey == "" && c.AnthropicAPIKey == "" {
-		return fmt.Errorf("config: set ANVIL_GEMINI_API_KEY and/or ANVIL_ANTHROPIC_API_KEY")
+	if c.GeminiAPIKey == "" && c.AnthropicAPIKey == "" && c.OpenAIAPIKey == "" {
+		return fmt.Errorf("config: set at least one of ANVIL_GEMINI_API_KEY, ANVIL_ANTHROPIC_API_KEY, ANVIL_OPENAI_API_KEY")
 	}
 	return nil
 }
@@ -126,15 +135,19 @@ type BenchConfig struct {
 	GeminiAPIKey    string
 	GeminiModel     string
 	AnthropicAPIKey string
+	OpenAIAPIKey    string
+	OpenAIModel     string
 }
 
-// LogValue redacts both API keys (CLAUDE.md I-3).
+// LogValue redacts every API key (CLAUDE.md I-3).
 func (c BenchConfig) LogValue() slog.Value {
 	return slog.GroupValue(
 		slog.String("runner_addr", c.RunnerAddr),
 		slog.Bool("gemini_configured", c.GeminiAPIKey != ""),
 		slog.String("gemini_model", c.GeminiModel),
 		slog.Bool("anthropic_configured", c.AnthropicAPIKey != ""),
+		slog.Bool("openai_configured", c.OpenAIAPIKey != ""),
+		slog.String("openai_model", c.OpenAIModel),
 	)
 }
 
@@ -147,9 +160,11 @@ func LoadBench() (BenchConfig, error) {
 		GeminiAPIKey:    os.Getenv("ANVIL_GEMINI_API_KEY"),
 		GeminiModel:     envOr("ANVIL_GEMINI_MODEL", defaultGeminiModel),
 		AnthropicAPIKey: os.Getenv("ANVIL_ANTHROPIC_API_KEY"),
+		OpenAIAPIKey:    os.Getenv("ANVIL_OPENAI_API_KEY"),
+		OpenAIModel:     envOr("ANVIL_OPENAI_MODEL", defaultOpenAIModel),
 	}
-	if cfg.GeminiAPIKey == "" && cfg.AnthropicAPIKey == "" {
-		return BenchConfig{}, fmt.Errorf("config: set ANVIL_GEMINI_API_KEY and/or ANVIL_ANTHROPIC_API_KEY")
+	if cfg.GeminiAPIKey == "" && cfg.AnthropicAPIKey == "" && cfg.OpenAIAPIKey == "" {
+		return BenchConfig{}, fmt.Errorf("config: set at least one of ANVIL_GEMINI_API_KEY, ANVIL_ANTHROPIC_API_KEY, ANVIL_OPENAI_API_KEY")
 	}
 	return cfg, nil
 }

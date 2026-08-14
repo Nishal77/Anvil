@@ -17,10 +17,26 @@ func TestConfig_Load_MissingLLMProviderKeyFails(t *testing.T) {
 	setRequiredEnv(t)
 	t.Setenv("ANVIL_ANTHROPIC_API_KEY", "")
 	t.Setenv("ANVIL_GEMINI_API_KEY", "")
+	t.Setenv("ANVIL_OPENAI_API_KEY", "")
 
 	_, err := Load()
 	if err == nil {
-		t.Fatal("Load() succeeded, want error when neither ANVIL_GEMINI_API_KEY nor ANVIL_ANTHROPIC_API_KEY is set")
+		t.Fatal("Load() succeeded, want error when none of the LLM provider keys is set")
+	}
+}
+
+func TestConfig_Load_OpenAIKeyAloneSatisfiesRequirement(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("ANVIL_ANTHROPIC_API_KEY", "")
+	t.Setenv("ANVIL_GEMINI_API_KEY", "")
+	t.Setenv("ANVIL_OPENAI_API_KEY", "test-key-not-real")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v, want success with only ANVIL_OPENAI_API_KEY set", err)
+	}
+	if cfg.OpenAIModel != defaultOpenAIModel {
+		t.Errorf("OpenAIModel = %q, want %q", cfg.OpenAIModel, defaultOpenAIModel)
 	}
 }
 
@@ -143,25 +159,41 @@ func TestLoadBench_AppliesDefaults(t *testing.T) {
 	}
 }
 
-func TestLoadBench_MissingBothKeysFails(t *testing.T) {
+func TestLoadBench_MissingAllKeysFails(t *testing.T) {
 	t.Setenv("ANVIL_GEMINI_API_KEY", "")
 	t.Setenv("ANVIL_ANTHROPIC_API_KEY", "")
+	t.Setenv("ANVIL_OPENAI_API_KEY", "")
 
 	if _, err := LoadBench(); err == nil {
-		t.Fatal("LoadBench() succeeded, want error when neither provider key is set")
+		t.Fatal("LoadBench() succeeded, want error when no provider key is set")
+	}
+}
+
+func TestLoadBench_OpenAIKeyAloneSatisfiesRequirement(t *testing.T) {
+	t.Setenv("ANVIL_GEMINI_API_KEY", "")
+	t.Setenv("ANVIL_ANTHROPIC_API_KEY", "")
+	t.Setenv("ANVIL_OPENAI_API_KEY", "test-key-not-real")
+
+	cfg, err := LoadBench()
+	if err != nil {
+		t.Fatalf("LoadBench() error: %v, want success with only ANVIL_OPENAI_API_KEY set", err)
+	}
+	if cfg.OpenAIModel != defaultOpenAIModel {
+		t.Errorf("OpenAIModel = %q, want %q", cfg.OpenAIModel, defaultOpenAIModel)
 	}
 }
 
 func TestBenchConfig_LogValue_RedactsKeys(t *testing.T) {
 	setRequiredBenchEnv(t)
 	t.Setenv("ANVIL_GEMINI_API_KEY", "gemini-secret-value")
+	t.Setenv("ANVIL_OPENAI_API_KEY", "openai-secret-value")
 	cfg, err := LoadBench()
 	if err != nil {
 		t.Fatalf("LoadBench() error: %v", err)
 	}
 
 	rendered := cfg.LogValue().String()
-	if strings.Contains(rendered, cfg.AnthropicAPIKey) || strings.Contains(rendered, "gemini-secret-value") {
+	if strings.Contains(rendered, cfg.AnthropicAPIKey) || strings.Contains(rendered, "gemini-secret-value") || strings.Contains(rendered, "openai-secret-value") {
 		t.Fatal("LogValue() leaked a raw API key")
 	}
 }
