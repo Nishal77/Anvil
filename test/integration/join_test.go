@@ -1,13 +1,19 @@
-// Package integration exercises the full Week 4 join — queue, executor,
-// sandbox, and events — against real infrastructure: a real Docker
-// sandbox, not a fake; a real Postgres, not a mock. See
-// internal/executor's own tests for the fake-sandbox unit-level coverage
-// of the same step-sequencing and replay-safety logic; this package is
-// what proves that logic actually works against the real thing.
+// Package integration exercises the full join of queue, agent
+// (registry, policy, executor loop), sandbox, and events against real
+// infrastructure: a real Docker sandbox, not a fake; a real Postgres,
+// not a mock. The LLM is the one thing not real here — CLAUDE.md T3
+// forbids any test calling a real LLM API, so the Router runs
+// llm.FakeProvider, scripted to call step_done immediately for every
+// step. That is enough to prove the wiring and durability claims this
+// file exists for (crash recovery, Redis-down resilience); it does not
+// exercise real model behavior — see internal/llm and internal/agent's
+// own unit tests for that, and BUILD-PLAN Week 6's manual Gate 2
+// demonstration for proof against a real provider.
 package integration
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -20,8 +26,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 
+	"github.com/anvil-dev/anvil/internal/agent"
 	"github.com/anvil-dev/anvil/internal/events"
-	"github.com/anvil-dev/anvil/internal/executor"
+	"github.com/anvil-dev/anvil/internal/llm"
 	"github.com/anvil-dev/anvil/internal/queue"
 	"github.com/anvil-dev/anvil/internal/sandbox"
 	"github.com/anvil-dev/anvil/internal/sandbox/runner"
@@ -77,7 +84,9 @@ func newTestPostgres(t *testing.T) (*pgxpool.Pool, *storage.Store) {
 		"../../migrations/001_users.up.sql",
 		"../../migrations/002_jobs.up.sql",
 		"../../migrations/003_steps.up.sql",
+		"../../migrations/004_agent_turns.up.sql",
 		"../../migrations/005_events.up.sql",
+		"../../migrations/006_idempotency.up.sql",
 	} {
 		sql, err := os.ReadFile(path)
 		if err != nil {
@@ -204,23 +213,68 @@ func TestJoin_HardcodedPlan_RunsThreeStepsEndToEnd_RealSandbox(t *testing.T) {
 	}
 
 	assertStepsSucceeded(t, pool, job.ID)
-	assertLogLinePersisted(t, store, job.ID)
+	assertStepEventsPersisted(t, store, job.ID)
+}
+
+// stepDoneImmediatelyProvider scripts a FakeProvider that calls
+// step_done(success=true) on the first turn of every step, enough
+// turns for all of hardcodedPlan's steps across both tests in this
+// file that construct their own executor.
+func stepDoneImmediatelyProvider(t *testing.T) *llm.FakeProvider {
+	t.Helper()
+	p := llm.NewFakeProvider("fake")
+	args, err := json.Marshal(map[string]any{"summary": "done", "success": true})
+	if err != nil {
+		t.Fatalf("marshal step_done args: %v", err)
+	}
+	for range 3 {
+		p.ScriptResponse(llm.Response{
+			Model:     "fake-model",
+			ToolCalls: []llm.ToolCall{{ID: "1", Name: "step_done", Input: args}},
+		})
+	}
+	return p
 }
 
 // newTestExecutor wires a real events.Publisher (backed by store and
-// redis) and a real executor.Executor from it — the setup both
-// integration tests in this file share.
-func newTestExecutor(t *testing.T, pool *pgxpool.Pool, store *storage.Store, sandboxClient *sandbox.Client) *executor.Executor {
+// redis), a real tool registry and policy engine, and an agent.Executor
+// driving a Router over a scripted FakeProvider (CLAUDE.md T3: no test
+// calls a real LLM API) — the setup both integration tests in this
+// file share.
+func newTestExecutor(t *testing.T, pool *pgxpool.Pool, store *storage.Store, sandboxClient *sandbox.Client) *agent.Executor {
 	t.Helper()
 	pub, err := events.New(events.Config{Store: store, Redis: alwaysDownRedis{}, Logger: discardLogger()})
 	if err != nil {
 		t.Fatalf("construct publisher: %v", err)
 	}
-	exec, err := executor.New(executor.Config{
-		Sandbox:   sandboxClient,
-		Publisher: pub,
-		Pool:      pool,
+
+	registry, err := agent.NewRegistry(append(
+		agent.NewFSTools(sandboxClient),
+		agent.NewExecTool(sandboxClient),
+		agent.NewStepDoneTool(),
+	)...)
+	if err != nil {
+		t.Fatalf("construct registry: %v", err)
+	}
+
+	budget := llm.NewInMemoryBudgetStore(150_000)
+	router, err := llm.NewRouter(llm.Config{
+		Providers: map[llm.TaskClass][]llm.Provider{llm.TaskExecution: {stepDoneImmediatelyProvider(t)}},
+		Budget:    budget,
 		Logger:    discardLogger(),
+	})
+	if err != nil {
+		t.Fatalf("construct router: %v", err)
+	}
+
+	policy, err := agent.NewPolicyEngine(agent.PolicyEngineConfig{Registry: registry, Sandbox: sandboxClient, Budget: budget})
+	if err != nil {
+		t.Fatalf("construct policy engine: %v", err)
+	}
+
+	exec, err := agent.New(agent.Config{
+		Registry: registry, Policy: policy, Router: router, Sandbox: sandboxClient,
+		Publisher: pub, IdemStore: store, Turns: store, Pool: pool, Logger: discardLogger(),
 	})
 	if err != nil {
 		t.Fatalf("construct executor: %v", err)
@@ -241,7 +295,13 @@ func assertStepsSucceeded(t *testing.T, pool *pgxpool.Pool, jobID uuid.UUID) {
 	}
 }
 
-func assertLogLinePersisted(t *testing.T, store *storage.Store, jobID uuid.UUID) {
+// assertStepEventsPersisted checks for step_started/step_finished
+// events. It does not check for log_line: the scripted FakeProvider
+// calls step_done immediately without ever calling exec, so no
+// container output exists to stream this run — that streaming path is
+// exec.go's Handler plumbing, unit-tested separately, not this file's
+// concern (queue/sandbox/events durability).
+func assertStepEventsPersisted(t *testing.T, store *storage.Store, jobID uuid.UUID) {
 	t.Helper()
 	gotEvents, err := store.ListEventsFrom(context.Background(), jobID, 0)
 	if err != nil {
@@ -250,12 +310,18 @@ func assertLogLinePersisted(t *testing.T, store *storage.Store, jobID uuid.UUID)
 	if len(gotEvents) == 0 {
 		t.Fatal("no events were persisted for the job at all")
 	}
+	var sawStarted, sawFinished bool
 	for _, ev := range gotEvents {
-		if ev.Type == "log_line" {
-			return
+		switch ev.Type {
+		case "step_started":
+			sawStarted = true
+		case "step_finished":
+			sawFinished = true
 		}
 	}
-	t.Error("no log_line event was persisted — real container output never made it to the event log")
+	if !sawStarted || !sawFinished {
+		t.Errorf("step_started seen=%t step_finished seen=%t, want both", sawStarted, sawFinished)
+	}
 }
 
 // TestI8_RedisDown_JobStillCompletesAndEventsQueryable is chaos test 7:

@@ -58,7 +58,7 @@ type ToolCall struct {
 }
 
 // Usage reports tokens as billed by the provider — the source of truth
-// for the AFTER budget check (FR-033). CachedInputTokens is tracked
+// the AFTER budget check (FR-033) uses. CachedInputTokens is tracked
 // separately so cost math doesn't bill cached input at the full rate
 // (NFR-013).
 type Usage struct {

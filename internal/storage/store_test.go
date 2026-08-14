@@ -62,7 +62,10 @@ func runTestMain(m *testing.M) int {
 	for _, path := range []string{
 		"../../migrations/001_users.up.sql",
 		"../../migrations/002_jobs.up.sql",
+		"../../migrations/003_steps.up.sql",
+		"../../migrations/004_agent_turns.up.sql",
 		"../../migrations/005_events.up.sql",
+		"../../migrations/006_idempotency.up.sql",
 	} {
 		migration, err := os.ReadFile(path)
 		if err != nil {

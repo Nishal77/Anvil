@@ -16,6 +16,8 @@ const (
 	defaultRunnerAddr       = "http://127.0.0.1:9090"
 	minJWTSigningKeyBytes   = 32
 	defaultGeminiModel      = "gemini-2.5-flash"
+	defaultMonthlyUSDCap    = 10
+	usdMicrosPerUSD         = 1_000_000
 )
 
 // Config holds process-wide configuration loaded from the environment.
@@ -29,6 +31,12 @@ type Config struct {
 	JWTSigningKey    []byte
 	AccessTokenTTL   time.Duration
 	RefreshTokenTTL  time.Duration
+	GeminiAPIKey     string
+	GeminiModel      string
+	AnthropicAPIKey  string
+	// MonthlyUSDCapMicros is ANVIL_MONTHLY_USD_CAP (whole USD) converted
+	// to micros — FR-034's global spend ceiling.
+	MonthlyUSDCapMicros int64
 }
 
 // LogValue redacts JWTSigningKey so a careless `slog.Any("config", cfg)`
@@ -43,6 +51,10 @@ func (c Config) LogValue() slog.Value {
 		slog.String("jwt_signing_key", "[redacted]"),
 		slog.Duration("access_token_ttl", c.AccessTokenTTL),
 		slog.Duration("refresh_token_ttl", c.RefreshTokenTTL),
+		slog.Bool("gemini_configured", c.GeminiAPIKey != ""),
+		slog.String("gemini_model", c.GeminiModel),
+		slog.Bool("anthropic_configured", c.AnthropicAPIKey != ""),
+		slog.Int64("monthly_usd_cap_micros", c.MonthlyUSDCapMicros),
 	)
 }
 
@@ -50,14 +62,18 @@ func (c Config) LogValue() slog.Value {
 // defaults for optional fields.
 func Load() (Config, error) {
 	cfg := Config{
-		HTTPAddr:         envOr("ANVIL_HTTP_ADDR", defaultHTTPAddr),
-		DatabaseURL:      os.Getenv("DATABASE_URL"),
-		DatabaseMaxConns: defaultDatabaseMaxConns,
-		RedisAddr:        envOr("REDIS_URL", ""),
-		RunnerAddr:       envOr("ANVIL_RUNNER_URL", defaultRunnerAddr),
-		JWTSigningKey:    []byte(os.Getenv("ANVIL_JWT_SECRET")),
-		AccessTokenTTL:   defaultAccessTokenTTL,
-		RefreshTokenTTL:  defaultRefreshTokenTTL,
+		HTTPAddr:            envOr("ANVIL_HTTP_ADDR", defaultHTTPAddr),
+		DatabaseURL:         os.Getenv("DATABASE_URL"),
+		DatabaseMaxConns:    defaultDatabaseMaxConns,
+		RedisAddr:           envOr("REDIS_URL", ""),
+		RunnerAddr:          envOr("ANVIL_RUNNER_URL", defaultRunnerAddr),
+		JWTSigningKey:       []byte(os.Getenv("ANVIL_JWT_SECRET")),
+		AccessTokenTTL:      defaultAccessTokenTTL,
+		RefreshTokenTTL:     defaultRefreshTokenTTL,
+		GeminiAPIKey:        os.Getenv("ANVIL_GEMINI_API_KEY"),
+		GeminiModel:         envOr("ANVIL_GEMINI_MODEL", defaultGeminiModel),
+		AnthropicAPIKey:     os.Getenv("ANVIL_ANTHROPIC_API_KEY"),
+		MonthlyUSDCapMicros: defaultMonthlyUSDCap * usdMicrosPerUSD,
 	}
 
 	if v := os.Getenv("DATABASE_MAX_CONNS"); v != "" {
@@ -66,6 +82,14 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("config: parse DATABASE_MAX_CONNS: %w", err)
 		}
 		cfg.DatabaseMaxConns = int32(n)
+	}
+
+	if v := os.Getenv("ANVIL_MONTHLY_USD_CAP"); v != "" {
+		usd, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			return Config{}, fmt.Errorf("config: parse ANVIL_MONTHLY_USD_CAP: %w", err)
+		}
+		cfg.MonthlyUSDCapMicros = usd * usdMicrosPerUSD
 	}
 
 	if err := cfg.validate(); err != nil {
@@ -86,6 +110,9 @@ func (c Config) validate() error {
 	}
 	if c.DatabaseMaxConns <= 0 {
 		return fmt.Errorf("config: DATABASE_MAX_CONNS must be positive, got %d", c.DatabaseMaxConns)
+	}
+	if c.GeminiAPIKey == "" && c.AnthropicAPIKey == "" {
+		return fmt.Errorf("config: set ANVIL_GEMINI_API_KEY and/or ANVIL_ANTHROPIC_API_KEY")
 	}
 	return nil
 }

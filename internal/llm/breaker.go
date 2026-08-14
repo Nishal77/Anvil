@@ -77,8 +77,8 @@ func (b *breaker) recordSuccess() {
 	b.halfOpenInFlight = false
 }
 
-// recordFailure counts one failure toward the threshold. Call only
-// for ErrProviderUnavailable — never for ErrRateLimited or
+// recordFailure counts one failure toward the threshold. Callers must
+// only pass ErrProviderUnavailable here — never ErrRateLimited or
 // ErrProviderFatal (see Router.Complete).
 func (b *breaker) recordFailure() {
 	b.mu.Lock()

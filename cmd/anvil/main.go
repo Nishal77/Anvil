@@ -11,13 +11,16 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/google/uuid"
 	"golang.org/x/sync/errgroup"
 
+	"github.com/anvil-dev/anvil/internal/agent"
 	"github.com/anvil-dev/anvil/internal/api"
 	"github.com/anvil-dev/anvil/internal/auth"
 	"github.com/anvil-dev/anvil/internal/config"
 	"github.com/anvil-dev/anvil/internal/events"
-	"github.com/anvil-dev/anvil/internal/executor"
+	"github.com/anvil-dev/anvil/internal/llm"
 	"github.com/anvil-dev/anvil/internal/queue"
 	"github.com/anvil-dev/anvil/internal/sandbox"
 	"github.com/anvil-dev/anvil/internal/storage"
@@ -126,14 +129,9 @@ func wireControlPlane(ctx context.Context, cfg config.Config, log *slog.Logger) 
 		return nil, fmt.Errorf("construct sandbox client: %w", err)
 	}
 
-	exec, err := executor.New(executor.Config{
-		Sandbox:   sandboxClient,
-		Publisher: publisher,
-		Pool:      store.Pool(),
-		Logger:    log,
-	})
+	exec, err := wireExecutor(ctx, cfg, sandboxClient, publisher, store, log)
 	if err != nil {
-		return nil, fmt.Errorf("construct executor: %w", err)
+		return nil, err
 	}
 
 	dispatcher, err := queue.New(queue.Config{
@@ -160,4 +158,104 @@ func wireControlPlane(ctx context.Context, cfg config.Config, log *slog.Logger) 
 	}
 
 	return &controlPlane{store: store, redis: redisClient, dispatcher: dispatcher, hub: hub, server: server}, nil
+}
+
+// wireExecutor builds the agent.Executor: the tool registry (§12.2's
+// SAFE/GUARDED tools — no git tools, no PRIVILEGED tools until Week 8),
+// the policy engine, an llm.Router over the configured provider ladder,
+// and the storage-backed idempotency/agent_turns stores.
+func wireExecutor(ctx context.Context, cfg config.Config, sandboxClient *sandbox.Client, pub *events.Publisher, store *storage.Store, log *slog.Logger) (*agent.Executor, error) {
+	registry, err := agent.NewRegistry(append(
+		agent.NewFSTools(sandboxClient),
+		agent.NewExecTool(sandboxClient),
+		agent.NewStepDoneTool(),
+	)...)
+	if err != nil {
+		return nil, fmt.Errorf("construct tool registry: %w", err)
+	}
+
+	budget := storageBudget{store: store}
+	router, err := wireRouter(ctx, cfg, budget, store, log)
+	if err != nil {
+		return nil, err
+	}
+
+	policy, err := agent.NewPolicyEngine(agent.PolicyEngineConfig{
+		Registry: registry,
+		Sandbox:  sandboxClient,
+		Budget:   budget,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("construct policy engine: %w", err)
+	}
+
+	exec, err := agent.New(agent.Config{
+		Registry:  registry,
+		Policy:    policy,
+		Router:    router,
+		Sandbox:   sandboxClient,
+		Publisher: pub,
+		IdemStore: store,
+		Turns:     store,
+		Pool:      store.Pool(),
+		Logger:    log,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("construct executor: %w", err)
+	}
+	return exec, nil
+}
+
+// wireRouter builds an llm.Router with Gemini primary / Anthropic
+// fallback for TaskExecution — the only task class the Week 6 executor
+// loop issues (TaskPlanning is Week 7's). Budget is the same
+// storageBudget instance the policy engine's rule 6 reads, so both are
+// checking one source of truth, not two budgets that can disagree.
+func wireRouter(ctx context.Context, cfg config.Config, budget llm.BudgetStore, spend llm.SpendReader, log *slog.Logger) (*llm.Router, error) {
+	var ladder []llm.Provider
+	if cfg.GeminiAPIKey != "" {
+		provider, err := llm.NewGeminiProvider(ctx, cfg.GeminiAPIKey, cfg.GeminiModel)
+		if err != nil {
+			return nil, fmt.Errorf("configure gemini provider: %w", err)
+		}
+		ladder = append(ladder, provider)
+	}
+	if cfg.AnthropicAPIKey != "" {
+		ladder = append(ladder, llm.NewAnthropicProvider(cfg.AnthropicAPIKey, anthropic.ModelClaudeHaiku4_5))
+	}
+
+	router, err := llm.NewRouter(llm.Config{
+		Providers: map[llm.TaskClass][]llm.Provider{llm.TaskExecution: ladder},
+		Budget:    budget,
+		Cap:       llm.NewGlobalCap(spend, cfg.MonthlyUSDCapMicros, log),
+		Logger:    log,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("construct llm router: %w", err)
+	}
+	return router, nil
+}
+
+// storageBudget adapts *storage.Store's primitive-typed job-budget
+// methods to llm.BudgetStore. Lives here, not in internal/storage,
+// because storage may not import llm (CLAUDE.md PK5); lives here
+// rather than internal/agent because it is a one-call piece of wiring,
+// not a reusable abstraction.
+type storageBudget struct {
+	store *storage.Store
+}
+
+func (b storageBudget) GetJobBudget(ctx context.Context, jobID uuid.UUID) (llm.JobBudget, error) {
+	tokenBudget, tokensUsed, err := b.store.GetJobTokenBudget(ctx, jobID)
+	if err != nil {
+		return llm.JobBudget{}, fmt.Errorf("storage budget: get job budget: %w", err)
+	}
+	return llm.JobBudget{TokenBudget: tokenBudget, TokensUsed: tokensUsed}, nil
+}
+
+func (b storageBudget) AddJobUsage(ctx context.Context, jobID uuid.UUID, tokens, costUSDMicros int64) error {
+	if err := b.store.AddJobTokenUsage(ctx, jobID, tokens, costUSDMicros); err != nil {
+		return fmt.Errorf("storage budget: add job usage: %w", err)
+	}
+	return nil
 }

@@ -10,6 +10,39 @@ func setRequiredEnv(t *testing.T) {
 	t.Setenv("DATABASE_URL", "postgres://localhost/anvil")
 	t.Setenv("REDIS_URL", "redis://localhost:6379")
 	t.Setenv("ANVIL_JWT_SECRET", "01234567890123456789012345678901")
+	t.Setenv("ANVIL_ANTHROPIC_API_KEY", "test-key-not-real")
+}
+
+func TestConfig_Load_MissingLLMProviderKeyFails(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("ANVIL_ANTHROPIC_API_KEY", "")
+	t.Setenv("ANVIL_GEMINI_API_KEY", "")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("Load() succeeded, want error when neither ANVIL_GEMINI_API_KEY nor ANVIL_ANTHROPIC_API_KEY is set")
+	}
+}
+
+func TestConfig_Load_MonthlyUSDCapDefaultsAndParses(t *testing.T) {
+	setRequiredEnv(t)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if cfg.MonthlyUSDCapMicros != defaultMonthlyUSDCap*usdMicrosPerUSD {
+		t.Errorf("MonthlyUSDCapMicros = %d, want %d", cfg.MonthlyUSDCapMicros, defaultMonthlyUSDCap*usdMicrosPerUSD)
+	}
+
+	t.Setenv("ANVIL_MONTHLY_USD_CAP", "25")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if cfg.MonthlyUSDCapMicros != 25*usdMicrosPerUSD {
+		t.Errorf("MonthlyUSDCapMicros = %d, want %d", cfg.MonthlyUSDCapMicros, 25*usdMicrosPerUSD)
+	}
 }
 
 func TestConfig_Load_MissingDatabaseURLFails(t *testing.T) {
@@ -60,5 +93,75 @@ func TestConfig_LogValue_RedactsJWTSigningKey(t *testing.T) {
 	rendered := cfg.LogValue().String()
 	if strings.Contains(rendered, string(cfg.JWTSigningKey)) {
 		t.Fatal("LogValue() leaked the raw JWT signing key")
+	}
+}
+
+func TestConfig_Load_InvalidDatabaseMaxConnsFails(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("DATABASE_MAX_CONNS", "not-a-number")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() succeeded, want error for unparseable DATABASE_MAX_CONNS")
+	}
+}
+
+func TestConfig_Load_InvalidMonthlyUSDCapFails(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("ANVIL_MONTHLY_USD_CAP", "not-a-number")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() succeeded, want error for unparseable ANVIL_MONTHLY_USD_CAP")
+	}
+}
+
+func TestConfig_Load_MissingRedisURLFails(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("REDIS_URL", "")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() succeeded, want error for missing REDIS_URL")
+	}
+}
+
+func setRequiredBenchEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("ANVIL_ANTHROPIC_API_KEY", "test-key-not-real")
+}
+
+func TestLoadBench_AppliesDefaults(t *testing.T) {
+	setRequiredBenchEnv(t)
+
+	cfg, err := LoadBench()
+	if err != nil {
+		t.Fatalf("LoadBench() error: %v", err)
+	}
+	if cfg.RunnerAddr != defaultRunnerAddr {
+		t.Errorf("RunnerAddr = %q, want %q", cfg.RunnerAddr, defaultRunnerAddr)
+	}
+	if cfg.GeminiModel != defaultGeminiModel {
+		t.Errorf("GeminiModel = %q, want %q", cfg.GeminiModel, defaultGeminiModel)
+	}
+}
+
+func TestLoadBench_MissingBothKeysFails(t *testing.T) {
+	t.Setenv("ANVIL_GEMINI_API_KEY", "")
+	t.Setenv("ANVIL_ANTHROPIC_API_KEY", "")
+
+	if _, err := LoadBench(); err == nil {
+		t.Fatal("LoadBench() succeeded, want error when neither provider key is set")
+	}
+}
+
+func TestBenchConfig_LogValue_RedactsKeys(t *testing.T) {
+	setRequiredBenchEnv(t)
+	t.Setenv("ANVIL_GEMINI_API_KEY", "gemini-secret-value")
+	cfg, err := LoadBench()
+	if err != nil {
+		t.Fatalf("LoadBench() error: %v", err)
+	}
+
+	rendered := cfg.LogValue().String()
+	if strings.Contains(rendered, cfg.AnthropicAPIKey) || strings.Contains(rendered, "gemini-secret-value") {
+		t.Fatal("LogValue() leaked a raw API key")
 	}
 }
