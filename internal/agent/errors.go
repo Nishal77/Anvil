@@ -35,4 +35,25 @@ var (
 	// not the repair loop (Week 7) — it is the hard ceiling FR-021
 	// exists to guarantee regardless of repair behavior.
 	ErrStepTurnLimitExceeded = errors.New("agent: step turn limit exceeded")
+
+	// ErrPlannerDidNotCallTool means the planning request returned
+	// without a submit_plan tool call — the only legal outcome of a
+	// planning turn. Structured output is required, never text parsed
+	// out of prose (FR-020).
+	ErrPlannerDidNotCallTool = errors.New("agent: planner did not call submit_plan")
+
+	// ErrPlanInvalid means the model's plan failed a code-enforced
+	// check: zero steps, or more steps than MaxSteps. Never trust the
+	// model to have respected a limit stated only in the prompt.
+	ErrPlanInvalid = errors.New("agent: plan invalid")
+
+	// ErrRepairCapExceeded means a step exhausted its repair budget
+	// (FR-022) — the step ends (FAILED, or SKIPPED if Optional), the
+	// job does not hang waiting for a repair that will never land.
+	ErrRepairCapExceeded = errors.New("agent: repair cap exceeded")
+
+	// ErrCancelled means the job's cancellation was observed between
+	// turns (PRD §13.3 step 2) — a normal, cooperative stop, not a
+	// crash.
+	ErrCancelled = errors.New("agent: job cancelled")
 )

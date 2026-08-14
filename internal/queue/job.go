@@ -2,6 +2,7 @@ package queue
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -47,6 +48,17 @@ type Job struct {
 	// fresh one — a fresh sandbox would silently lose whatever earlier
 	// steps had already done inside it.
 	SandboxID string
+	// PlanSummary and PlanRisks are the planner's output (PRD §12.1),
+	// set by SavePlan alongside the step rows it inserts.
+	PlanSummary string
+	PlanRisks   json.RawMessage
+	// AutoApprove, set at submission (PRD §11's options.auto_approve),
+	// tells SavePlan whether to land the plan in QUEUED directly or
+	// AWAITING_APPROVAL.
+	AutoApprove bool
+	// CancelRequestedAt is non-nil once POST /cancel has been called
+	// (PRD §13.3 step 1). The executor polls this between every turn.
+	CancelRequestedAt *time.Time
 }
 
 // JobStatusFields carries the optional column writes that accompany a
@@ -66,50 +78,61 @@ type JobStatusFields struct {
 	RunAfter *time.Time
 }
 
-const createJobSQL = `
-INSERT INTO jobs (user_id, prompt)
-VALUES ($1, $2)
-RETURNING id, user_id, prompt, status, COALESCE(failure_reason, ''),
-          attempt, max_attempts, COALESCE(lease_owner, ''), lease_expires_at,
-          run_after, created_at, started_at, finished_at, COALESCE(sandbox_id, '')`
+// jobColumns is the column list shared by every query that reads a full
+// Job row — one place to add a column instead of four (Create*, Get,
+// List), so they can't drift apart from each other.
+const jobColumns = `id, user_id, prompt, status, COALESCE(failure_reason, ''),
+	attempt, max_attempts, COALESCE(lease_owner, ''), lease_expires_at,
+	run_after, created_at, started_at, finished_at, COALESCE(sandbox_id, ''),
+	COALESCE(plan_summary, ''), plan_risks, auto_approve, cancel_requested_at`
 
-// CreateJob inserts a new job in PENDING_PLAN, immediately claimable.
-func CreateJob(ctx context.Context, pool *pgxpool.Pool, userID uuid.UUID, prompt string) (*Job, error) {
+// scanJob reads one jobColumns-shaped row into a Job.
+func scanJob(row pgx.Row) (*Job, error) {
 	var j Job
-	err := pool.QueryRow(ctx, createJobSQL, userID, prompt).Scan(
+	err := row.Scan(
 		&j.ID, &j.UserID, &j.Prompt, &j.Status, &j.FailureReason,
 		&j.Attempt, &j.MaxAttempts, &j.LeaseOwner, &j.LeaseExpiresAt,
 		&j.RunAfter, &j.CreatedAt, &j.StartedAt, &j.FinishedAt, &j.SandboxID,
+		&j.PlanSummary, &j.PlanRisks, &j.AutoApprove, &j.CancelRequestedAt,
 	)
+	if err != nil {
+		return nil, fmt.Errorf("queue: scan job: %w", err)
+	}
+	return &j, nil
+}
+
+// const string concatenation (both operands are untyped constants) —
+// not a package-level var (CLAUDE.md §5.2).
+const createJobSQL = `
+INSERT INTO jobs (user_id, prompt, auto_approve)
+VALUES ($1, $2, $3)
+RETURNING ` + jobColumns
+
+// CreateJob inserts a new job in PENDING_PLAN, immediately claimable by
+// the planner.
+func CreateJob(ctx context.Context, pool *pgxpool.Pool, userID uuid.UUID, prompt string, autoApprove bool) (*Job, error) {
+	j, err := scanJob(pool.QueryRow(ctx, createJobSQL, userID, prompt, autoApprove))
 	if err != nil {
 		return nil, fmt.Errorf("queue: create job: %w", err)
 	}
-	return &j, nil
+	return j, nil
 }
 
 const createQueuedJobSQL = `
 INSERT INTO jobs (user_id, prompt, status, started_at)
 VALUES ($1, $2, 'QUEUED', NULL)
-RETURNING id, user_id, prompt, status, COALESCE(failure_reason, ''),
-          attempt, max_attempts, COALESCE(lease_owner, ''), lease_expires_at,
-          run_after, created_at, started_at, finished_at, COALESCE(sandbox_id, '')`
+RETURNING ` + jobColumns
 
 // CreateQueuedJob inserts a new job already in QUEUED, skipping
-// PENDING_PLAN and PLANNING entirely. Phase 1 has no planner to produce a
-// plan for those states to represent, so a job's plan is decided before
-// this is even called (right now: a fixed slice of steps in
-// internal/executor) and there's nothing to wait on approval for.
+// PENDING_PLAN and PLANNING entirely — used only by tests that don't
+// need a real planner run (production traffic always goes through
+// CreateJob so the planner and approval gate apply).
 func CreateQueuedJob(ctx context.Context, pool *pgxpool.Pool, userID uuid.UUID, prompt string) (*Job, error) {
-	var j Job
-	err := pool.QueryRow(ctx, createQueuedJobSQL, userID, prompt).Scan(
-		&j.ID, &j.UserID, &j.Prompt, &j.Status, &j.FailureReason,
-		&j.Attempt, &j.MaxAttempts, &j.LeaseOwner, &j.LeaseExpiresAt,
-		&j.RunAfter, &j.CreatedAt, &j.StartedAt, &j.FinishedAt, &j.SandboxID,
-	)
+	j, err := scanJob(pool.QueryRow(ctx, createQueuedJobSQL, userID, prompt))
 	if err != nil {
 		return nil, fmt.Errorf("queue: create queued job: %w", err)
 	}
-	return &j, nil
+	return j, nil
 }
 
 const setJobSandboxIDSQL = `UPDATE jobs SET sandbox_id = $2 WHERE id = $1`
@@ -126,11 +149,7 @@ func SetJobSandboxID(ctx context.Context, pool *pgxpool.Pool, jobID uuid.UUID, s
 	return nil
 }
 
-const getJobSQL = `
-SELECT id, user_id, prompt, status, COALESCE(failure_reason, ''),
-       attempt, max_attempts, COALESCE(lease_owner, ''), lease_expires_at,
-       run_after, created_at, started_at, finished_at, COALESCE(sandbox_id, '')
-FROM jobs WHERE id = $1`
+const getJobSQL = `SELECT ` + jobColumns + ` FROM jobs WHERE id = $1`
 
 // getJob reads jobID's current row.
 func getJob(ctx context.Context, pool *pgxpool.Pool, jobID uuid.UUID) (*Job, error) {
@@ -151,11 +170,7 @@ func GetJob(ctx context.Context, pool *pgxpool.Pool, jobID uuid.UUID) (*Job, err
 	return j, nil
 }
 
-const listJobsForUserSQL = `
-SELECT id, user_id, prompt, status, COALESCE(failure_reason, ''),
-       attempt, max_attempts, COALESCE(lease_owner, ''), lease_expires_at,
-       run_after, created_at, started_at, finished_at, COALESCE(sandbox_id, '')
-FROM jobs WHERE user_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3`
+const listJobsForUserSQL = `SELECT ` + jobColumns + ` FROM jobs WHERE user_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3`
 
 // ListJobsForUser returns userID's jobs, newest first, paginated.
 func ListJobsForUser(ctx context.Context, pool *pgxpool.Pool, userID uuid.UUID, limit, offset int) ([]*Job, error) {
@@ -167,15 +182,11 @@ func ListJobsForUser(ctx context.Context, pool *pgxpool.Pool, userID uuid.UUID, 
 
 	var jobs []*Job
 	for rows.Next() {
-		var j Job
-		if err := rows.Scan(
-			&j.ID, &j.UserID, &j.Prompt, &j.Status, &j.FailureReason,
-			&j.Attempt, &j.MaxAttempts, &j.LeaseOwner, &j.LeaseExpiresAt,
-			&j.RunAfter, &j.CreatedAt, &j.StartedAt, &j.FinishedAt, &j.SandboxID,
-		); err != nil {
+		j, err := scanJob(rows)
+		if err != nil {
 			return nil, fmt.Errorf("queue: list jobs for user %s: scan: %w", userID, err)
 		}
-		jobs = append(jobs, &j)
+		jobs = append(jobs, j)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("queue: list jobs for user %s: %w", userID, err)
@@ -187,14 +198,9 @@ func ListJobsForUser(ctx context.Context, pool *pgxpool.Pool, userID uuid.UUID, 
 // pgx.Tx, so callers inside a transaction (e.g. sweeper.deadLetterJob) see
 // their own uncommitted writes.
 func getJobVia(ctx context.Context, q querier, jobID uuid.UUID) (*Job, error) {
-	var j Job
-	err := q.QueryRow(ctx, getJobSQL, jobID).Scan(
-		&j.ID, &j.UserID, &j.Prompt, &j.Status, &j.FailureReason,
-		&j.Attempt, &j.MaxAttempts, &j.LeaseOwner, &j.LeaseExpiresAt,
-		&j.RunAfter, &j.CreatedAt, &j.StartedAt, &j.FinishedAt, &j.SandboxID,
-	)
+	j, err := scanJob(q.QueryRow(ctx, getJobSQL, jobID))
 	if err != nil {
 		return nil, fmt.Errorf("queue: get job %s: %w", jobID, err)
 	}
-	return &j, nil
+	return j, nil
 }

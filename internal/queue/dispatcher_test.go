@@ -25,6 +25,37 @@ func newTestDispatcher(t *testing.T, runStep func(ctx context.Context, job *Job)
 	return d
 }
 
+// TestDispatcher_DestroyWedgedSandboxes_CallsHookForEachID proves the
+// sweeper's wedged-worker cancellation actually reaches the sandbox
+// client — a force-cancelled job's container must not leak just
+// because the worker never acknowledged.
+func TestDispatcher_DestroyWedgedSandboxes_CallsHookForEachID(t *testing.T) {
+	var destroyed []string
+	d, err := New(Config{
+		Pool: testPool, Logger: testLogger(), RunStep: func(context.Context, *Job) error { return nil },
+		DestroySandbox: func(_ context.Context, sandboxID string) error {
+			destroyed = append(destroyed, sandboxID)
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+
+	d.destroyWedgedSandboxes(context.Background(), []string{"a", "b"})
+	if len(destroyed) != 2 || destroyed[0] != "a" || destroyed[1] != "b" {
+		t.Errorf("destroyed = %v, want [a b]", destroyed)
+	}
+}
+
+// TestDispatcher_DestroyWedgedSandboxes_NilHookIsNoop proves a
+// Dispatcher configured without DestroySandbox (the default in tests
+// that don't exercise the wedged path) doesn't panic.
+func TestDispatcher_DestroyWedgedSandboxes_NilHookIsNoop(t *testing.T) {
+	d := newTestDispatcher(t, func(context.Context, *Job) error { return nil })
+	d.destroyWedgedSandboxes(context.Background(), []string{"a"})
+}
+
 func TestDispatcher_Run_ClaimsExecutesAndSucceeds(t *testing.T) {
 	job := seedQueuedJob(t)
 	d := newTestDispatcher(t, func(context.Context, *Job) error { return nil })

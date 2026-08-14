@@ -65,6 +65,7 @@ func runTestMain(m *testing.M) int {
 		"../../migrations/003_steps.up.sql",
 		"../../migrations/006_idempotency.up.sql",
 		"../../migrations/007_dead_letter.up.sql",
+		"../../migrations/008_planning.up.sql",
 	} {
 		sql, err := os.ReadFile(path)
 		if err != nil {
@@ -121,7 +122,7 @@ func seedUser(t *testing.T) uuid.UUID {
 // need to exercise a full claim-run-succeed cycle.
 func seedJob(t *testing.T) *Job {
 	t.Helper()
-	job, err := CreateJob(context.Background(), testPool, seedUser(t), "test prompt")
+	job, err := CreateJob(context.Background(), testPool, seedUser(t), "test prompt", false)
 	if err != nil {
 		t.Fatalf("seedJob: %v", err)
 	}

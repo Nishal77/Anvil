@@ -70,10 +70,32 @@ func newIntegrationExecutor(t *testing.T, pool *pgxpool.Pool, sb *fakeSandbox, p
 	return exec
 }
 
+// testPlanStepCount is how many step rows seedQueuedJobWithSteps plants
+// — replaces the old hardcodedPlan's 3 fixed steps now that RunStep
+// reads its plan from the steps table (written by the Planner in
+// production, seeded directly here in tests that bypass planning via
+// CreateQueuedJob).
+const testPlanStepCount = 3
+
+func seedQueuedJobWithSteps(t *testing.T, pool *pgxpool.Pool) *queue.Job {
+	t.Helper()
+	userID := seedTestUser(t, pool)
+	job, err := queue.CreateQueuedJob(context.Background(), pool, userID, "build me a thing")
+	if err != nil {
+		t.Fatalf("CreateQueuedJob() error = %v", err)
+	}
+	for idx := range testPlanStepCount {
+		if _, err := queue.EnsureStep(context.Background(), pool, job.ID, idx, "title", "description"); err != nil {
+			t.Fatalf("EnsureStep(%d) error = %v", idx, err)
+		}
+	}
+	return job
+}
+
 func stepDoneOnceProvider(t *testing.T) *llm.FakeProvider {
 	t.Helper()
 	p := llm.NewFakeProvider("fake")
-	for range 3 {
+	for range testPlanStepCount {
 		p.ScriptResponse(llm.Response{Model: "fake-model", ToolCalls: []llm.ToolCall{stepDoneCall(t, true)}})
 	}
 	return p
@@ -81,11 +103,7 @@ func stepDoneOnceProvider(t *testing.T) *llm.FakeProvider {
 
 func TestExecutor_RunStep_AllStepsSucceed(t *testing.T) {
 	pool := requireIntegrationPool(t)
-	userID := seedTestUser(t, pool)
-	job, err := queue.CreateQueuedJob(context.Background(), pool, userID, "build me a thing")
-	if err != nil {
-		t.Fatalf("CreateQueuedJob() error = %v", err)
-	}
+	job := seedQueuedJobWithSteps(t, pool)
 
 	sb := newFakeSandbox()
 	exec := newIntegrationExecutor(t, pool, sb, stepDoneOnceProvider(t))
@@ -105,31 +123,28 @@ func TestExecutor_RunStep_AllStepsSucceed(t *testing.T) {
 		t.Errorf("sandbox created=%d destroyed=%d, want 1 and 1", sb.created, sb.destroyed)
 	}
 
-	for idx := range hardcodedPlan {
-		step, err := queue.EnsureStep(context.Background(), pool, job.ID, idx, "x", "x")
-		if err != nil {
-			t.Fatalf("EnsureStep(%d) error = %v", idx, err)
-		}
+	steps, err := queue.ListSteps(context.Background(), pool, job.ID)
+	if err != nil {
+		t.Fatalf("ListSteps() error = %v", err)
+	}
+	for _, step := range steps {
 		if step.Status != queue.StepSucceeded {
-			t.Errorf("step %d status = %q, want %q", idx, step.Status, queue.StepSucceeded)
+			t.Errorf("step %d status = %q, want %q", step.Idx, step.Status, queue.StepSucceeded)
 		}
 	}
 }
 
 func TestExecutor_RunStep_ResumesFromLastSucceededStep(t *testing.T) {
 	pool := requireIntegrationPool(t)
-	userID := seedTestUser(t, pool)
-	job, err := queue.CreateQueuedJob(context.Background(), pool, userID, "build me a thing")
-	if err != nil {
-		t.Fatalf("CreateQueuedJob() error = %v", err)
-	}
+	job := seedQueuedJobWithSteps(t, pool)
 
 	// Manually mark step 0 SUCCEEDED, as if a prior, crashed attempt had
 	// already finished it — RunStep must not redo it.
-	step0, err := queue.EnsureStep(context.Background(), pool, job.ID, 0, hardcodedPlan[0].Title, hardcodedPlan[0].Description)
+	steps, err := queue.ListSteps(context.Background(), pool, job.ID)
 	if err != nil {
-		t.Fatalf("EnsureStep(0) error = %v", err)
+		t.Fatalf("ListSteps() error = %v", err)
 	}
+	step0 := steps[0]
 	if err := queue.StartStep(context.Background(), pool, step0.ID); err != nil {
 		t.Fatalf("StartStep(0) error = %v", err)
 	}
@@ -156,11 +171,7 @@ func TestExecutor_RunStep_ResumesFromLastSucceededStep(t *testing.T) {
 
 func TestExecutor_RunStep_StepFailurePropagatesAndStillDestroysSandbox(t *testing.T) {
 	pool := requireIntegrationPool(t)
-	userID := seedTestUser(t, pool)
-	job, err := queue.CreateQueuedJob(context.Background(), pool, userID, "build me a thing")
-	if err != nil {
-		t.Fatalf("CreateQueuedJob() error = %v", err)
-	}
+	job := seedQueuedJobWithSteps(t, pool)
 
 	sb := newFakeSandbox()
 	provider := llm.NewFakeProvider("fake").ScriptResponse(llm.Response{Model: "fake-model", ToolCalls: []llm.ToolCall{stepDoneCall(t, false)}})

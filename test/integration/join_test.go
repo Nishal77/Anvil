@@ -87,6 +87,7 @@ func newTestPostgres(t *testing.T) (*pgxpool.Pool, *storage.Store) {
 		"../../migrations/004_agent_turns.up.sql",
 		"../../migrations/005_events.up.sql",
 		"../../migrations/006_idempotency.up.sql",
+		"../../migrations/008_planning.up.sql",
 	} {
 		sql, err := os.ReadFile(path)
 		if err != nil {
@@ -199,6 +200,7 @@ func TestJoin_HardcodedPlan_RunsThreeStepsEndToEnd_RealSandbox(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateQueuedJob: %v", err)
 	}
+	seedThreeSteps(t, pool, job.ID)
 
 	if err := exec.RunStep(context.Background(), job); err != nil {
 		t.Fatalf("RunStep: %v", err)
@@ -282,6 +284,20 @@ func newTestExecutor(t *testing.T, pool *pgxpool.Pool, store *storage.Store, san
 	return exec
 }
 
+// seedThreeSteps plants the 3 step rows RunStep now reads from the
+// steps table (queue.ListSteps) instead of an in-process hardcoded
+// plan — the Planner writes these in production (queue.SavePlan);
+// CreateQueuedJob's test-only bypass skips planning entirely, so
+// these tests plant them directly.
+func seedThreeSteps(t *testing.T, pool *pgxpool.Pool, jobID uuid.UUID) {
+	t.Helper()
+	for idx := range 3 {
+		if _, err := queue.EnsureStep(context.Background(), pool, jobID, idx, "x", "x"); err != nil {
+			t.Fatalf("EnsureStep(%d): %v", idx, err)
+		}
+	}
+}
+
 func assertStepsSucceeded(t *testing.T, pool *pgxpool.Pool, jobID uuid.UUID) {
 	t.Helper()
 	for idx := range 3 {
@@ -337,6 +353,7 @@ func TestI8_RedisDown_JobStillCompletesAndEventsQueryable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateQueuedJob: %v", err)
 	}
+	seedThreeSteps(t, pool, job.ID)
 
 	if err := exec.RunStep(context.Background(), job); err != nil {
 		t.Fatalf("RunStep: %v, want the job to complete even with Redis unreachable", err)

@@ -129,15 +129,16 @@ func wireControlPlane(ctx context.Context, cfg config.Config, log *slog.Logger) 
 		return nil, fmt.Errorf("construct sandbox client: %w", err)
 	}
 
-	exec, err := wireExecutor(ctx, cfg, sandboxClient, publisher, store, log)
+	exec, planner, err := wireAgent(ctx, cfg, sandboxClient, publisher, store, log)
 	if err != nil {
 		return nil, err
 	}
 
 	dispatcher, err := queue.New(queue.Config{
-		Pool:    store.Pool(),
-		Logger:  log,
-		RunStep: exec.RunStep,
+		Pool:           store.Pool(),
+		Logger:         log,
+		RunStep:        dispatchJob(planner, exec),
+		DestroySandbox: sandboxClient.Destroy,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("construct dispatcher: %w", err)
@@ -160,24 +161,26 @@ func wireControlPlane(ctx context.Context, cfg config.Config, log *slog.Logger) 
 	return &controlPlane{store: store, redis: redisClient, dispatcher: dispatcher, hub: hub, server: server}, nil
 }
 
-// wireExecutor builds the agent.Executor: the tool registry (§12.2's
-// SAFE/GUARDED tools — no git tools, no PRIVILEGED tools until Week 8),
-// the policy engine, an llm.Router over the configured provider ladder,
-// and the storage-backed idempotency/agent_turns stores.
-func wireExecutor(ctx context.Context, cfg config.Config, sandboxClient *sandbox.Client, pub *events.Publisher, store *storage.Store, log *slog.Logger) (*agent.Executor, error) {
+// wireAgent builds the agent.Executor and agent.Planner: the tool
+// registry (§12.2's SAFE/GUARDED tools — no git tools, no PRIVILEGED
+// tools until Week 8), the policy engine, an llm.Router over the
+// configured provider ladder (shared across TaskExecution, TaskPlanning,
+// and TaskSummarization — Anvil has one provider ladder, not per-role
+// ones), and the storage-backed idempotency/agent_turns stores.
+func wireAgent(ctx context.Context, cfg config.Config, sandboxClient *sandbox.Client, pub *events.Publisher, store *storage.Store, log *slog.Logger) (*agent.Executor, *agent.Planner, error) {
 	registry, err := agent.NewRegistry(append(
 		agent.NewFSTools(sandboxClient),
 		agent.NewExecTool(sandboxClient),
 		agent.NewStepDoneTool(),
 	)...)
 	if err != nil {
-		return nil, fmt.Errorf("construct tool registry: %w", err)
+		return nil, nil, fmt.Errorf("construct tool registry: %w", err)
 	}
 
 	budget := storageBudget{store: store}
 	router, err := wireRouter(ctx, cfg, budget, store, log)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	policy, err := agent.NewPolicyEngine(agent.PolicyEngineConfig{
@@ -186,7 +189,7 @@ func wireExecutor(ctx context.Context, cfg config.Config, sandboxClient *sandbox
 		Budget:   budget,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("construct policy engine: %w", err)
+		return nil, nil, fmt.Errorf("construct policy engine: %w", err)
 	}
 
 	exec, err := agent.New(agent.Config{
@@ -201,18 +204,29 @@ func wireExecutor(ctx context.Context, cfg config.Config, sandboxClient *sandbox
 		Logger:    log,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("construct executor: %w", err)
+		return nil, nil, fmt.Errorf("construct executor: %w", err)
 	}
-	return exec, nil
+
+	planner, err := agent.NewPlanner(agent.PlannerConfig{
+		Router:   router,
+		Pool:     store.Pool(),
+		MaxSteps: cfg.MaxSteps,
+		Logger:   log,
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("construct planner: %w", err)
+	}
+	return exec, planner, nil
 }
 
 // wireRouter builds an llm.Router with Anthropic primary / OpenAI
-// fallback for TaskExecution — the only task class the Week 6 executor
-// loop issues (TaskPlanning is Week 7's). Gemini is appended last,
-// only if configured — it is not required (ANVIL_GEMINI_API_KEY may
-// be left unset). Budget is the same storageBudget instance the
-// policy engine's rule 6 reads, so both are checking one source of
-// truth, not two budgets that can disagree.
+// fallback for every task class the agent runtime issues: TaskExecution
+// (the turn loop), TaskPlanning (Week 7), and TaskSummarization (the
+// context builder's compaction). Gemini is appended last, only if
+// configured — it is not required (ANVIL_GEMINI_API_KEY may be left
+// unset). Budget is the same storageBudget instance the policy engine's
+// rule 6 reads, so both are checking one source of truth, not two
+// budgets that can disagree.
 func wireRouter(ctx context.Context, cfg config.Config, budget llm.BudgetStore, spend llm.SpendReader, log *slog.Logger) (*llm.Router, error) {
 	var ladder []llm.Provider
 	if cfg.AnthropicAPIKey != "" {
@@ -230,15 +244,44 @@ func wireRouter(ctx context.Context, cfg config.Config, budget llm.BudgetStore, 
 	}
 
 	router, err := llm.NewRouter(llm.Config{
-		Providers: map[llm.TaskClass][]llm.Provider{llm.TaskExecution: ladder},
-		Budget:    budget,
-		Cap:       llm.NewGlobalCap(spend, cfg.MonthlyUSDCapMicros, log),
-		Logger:    log,
+		Providers: map[llm.TaskClass][]llm.Provider{
+			llm.TaskExecution:     ladder,
+			llm.TaskPlanning:      ladder,
+			llm.TaskSummarization: ladder,
+		},
+		Budget: budget,
+		Cap:    llm.NewGlobalCap(spend, cfg.MonthlyUSDCapMicros, log),
+		Logger: log,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("construct llm router: %w", err)
 	}
 	return router, nil
+}
+
+// plannerEnv is the sandbox's actual, fixed shape (PRD §12.1's
+// EnvDescription) — static config for v1, per the Week 7 spec's open
+// question 3; a startup assertion that the image matches this is
+// deferred to Week 11.
+var plannerEnv = agent.EnvDescription{
+	Image:     "anvil-workspace",
+	Languages: []string{"go1.23"},
+	Network:   "allowlist: proxy.golang.org, github.com",
+}
+
+// dispatchJob routes a claimed job to the Planner or the Executor by
+// its status (queue.Dispatcher claims both PENDING_PLAN -> PLANNING and
+// QUEUED -> RUNNING through the same Claim call, so one RunStep hook
+// must handle both).
+func dispatchJob(planner *agent.Planner, exec *agent.Executor) func(ctx context.Context, job *queue.Job) error {
+	return func(ctx context.Context, job *queue.Job) error {
+		switch job.Status {
+		case queue.StatusPlanning:
+			return planner.RunPlan(ctx, job, plannerEnv)
+		default:
+			return exec.RunStep(ctx, job)
+		}
+	}
 }
 
 // storageBudget adapts *storage.Store's primitive-typed job-budget

@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/anvil-dev/anvil/internal/llm"
 	"github.com/anvil-dev/anvil/internal/queue"
@@ -54,12 +55,35 @@ func (f *fakeTurnStore) all() []storage.AgentTurn {
 	return append([]storage.AgentTurn(nil), f.turns...)
 }
 
+// ListAgentTurns returns every turn recorded so far, in insertion
+// order — insertion order matches turn_idx order, since InsertAgentTurn
+// is always called in turn order, exactly like the real store.
+func (f *fakeTurnStore) ListAgentTurns(_ context.Context, jobID uuid.UUID) ([]storage.AgentTurn, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []storage.AgentTurn
+	for _, t := range f.turns {
+		if t.JobID == jobID {
+			out = append(out, t)
+		}
+	}
+	return out, nil
+}
+
 func testExecutor(t *testing.T, provider llm.Provider, sb *fakeSandbox, turns *fakeTurnStore) *Executor {
 	t.Helper()
 	registry := testRegistry(t, sb)
 	budget := llm.NewInMemoryBudgetStore(150_000)
+	// A separate, generously-scripted fake backs TaskSummarization: the
+	// turn loop's own script (provider) is consumed turn-by-turn by
+	// TaskExecution calls, and the two task classes must not share one
+	// script or a summarization call would eat a scripted turn response.
+	summarizer := llm.NewFakeProvider("fake-summarizer")
+	for range 1000 {
+		summarizer.ScriptResponse(llm.Response{Model: "fake-model", Text: "summary"})
+	}
 	router, err := llm.NewRouter(llm.Config{
-		Providers: map[llm.TaskClass][]llm.Provider{llm.TaskExecution: {provider}},
+		Providers: map[llm.TaskClass][]llm.Provider{llm.TaskExecution: {provider}, llm.TaskSummarization: {summarizer}},
 		Budget:    budget,
 		Logger:    slog.New(slog.DiscardHandler),
 	})
@@ -73,8 +97,28 @@ func testExecutor(t *testing.T, provider llm.Provider, sb *fakeSandbox, turns *f
 	return &Executor{
 		registry: registry, policy: policy, router: router, sandbox: sb,
 		idem: newFakeIdemStore(), turns: turns, log: slog.New(slog.DiscardHandler),
-		maxTurns: defaultMaxTurnsPerStep, maxObsLen: defaultMaxObservationBytes,
+		pool: requireIntegrationPool(t), cancel: noopCancelWatcher{},
+		context: NewContextBuilder(defaultMaxContextTokens, nil), compact: NewCompactor(router, 0),
+		maxTurns: defaultMaxTurnsPerStep, maxObsLen: defaultMaxObservationBytes, maxRepairs: defaultMaxRepairsPerStep,
 	}
+}
+
+// seedJobAndStep seeds a real job and step row: runOneTurn's
+// turn/repair-count bookkeeping writes through queue.IncrementTurnCount
+// / IncrementRepairCount, which need a real row to target, and steps.job_id
+// has a foreign key into jobs.
+func seedJobAndStep(t *testing.T, pool *pgxpool.Pool) (*queue.Job, queue.Step, []queue.Step) {
+	t.Helper()
+	userID := seedTestUser(t, pool)
+	job, err := queue.CreateQueuedJob(context.Background(), pool, userID, "test prompt")
+	if err != nil {
+		t.Fatalf("CreateQueuedJob: %v", err)
+	}
+	step, err := queue.EnsureStep(context.Background(), pool, job.ID, 0, "title", "description")
+	if err != nil {
+		t.Fatalf("EnsureStep: %v", err)
+	}
+	return job, step, []queue.Step{step}
 }
 
 func stepDoneCall(t *testing.T, success bool) llm.ToolCall {
@@ -90,8 +134,9 @@ func TestExecutor_RunTurnLoop_StepDoneEndsLoopSuccessfully(t *testing.T) {
 	provider := llm.NewFakeProvider("fake").ScriptResponse(llm.Response{Model: "fake-model", ToolCalls: []llm.ToolCall{stepDoneCall(t, true)}})
 	turns := &fakeTurnStore{}
 	e := testExecutor(t, provider, newFakeSandbox(), turns)
+	job, step, steps := seedJobAndStep(t, requireIntegrationPool(t))
 
-	success, summary, err := e.runTurnLoop(context.Background(), uuid.New(), queue.Step{ID: uuid.New(), Idx: 0}, "fake-sandbox", hardcodedPlan[0])
+	success, summary, err := e.runTurnLoop(context.Background(), job, steps, step, "fake-sandbox")
 	if err != nil {
 		t.Fatalf("runTurnLoop() error = %v", err)
 	}
@@ -106,8 +151,9 @@ func TestExecutor_RunTurnLoop_StepDoneEndsLoopSuccessfully(t *testing.T) {
 func TestExecutor_RunTurnLoop_StepDoneFailureReported(t *testing.T) {
 	provider := llm.NewFakeProvider("fake").ScriptResponse(llm.Response{Model: "fake-model", ToolCalls: []llm.ToolCall{stepDoneCall(t, false)}})
 	e := testExecutor(t, provider, newFakeSandbox(), &fakeTurnStore{})
+	job, step, steps := seedJobAndStep(t, requireIntegrationPool(t))
 
-	success, _, err := e.runTurnLoop(context.Background(), uuid.New(), queue.Step{ID: uuid.New(), Idx: 0}, "fake-sandbox", hardcodedPlan[0])
+	success, _, err := e.runTurnLoop(context.Background(), job, steps, step, "fake-sandbox")
 	if err != nil {
 		t.Fatalf("runTurnLoop() error = %v", err)
 	}
@@ -126,8 +172,9 @@ func TestExecutor_RunTurnLoop_SchemaInvalidCallSurvivesAsObservation(t *testing.
 		ScriptResponse(llm.Response{Model: "fake-model", ToolCalls: []llm.ToolCall{stepDoneCall(t, true)}})
 	turns := &fakeTurnStore{}
 	e := testExecutor(t, provider, newFakeSandbox(), turns)
+	job, step, steps := seedJobAndStep(t, requireIntegrationPool(t))
 
-	success, _, err := e.runTurnLoop(context.Background(), uuid.New(), queue.Step{ID: uuid.New(), Idx: 0}, "fake-sandbox", hardcodedPlan[0])
+	success, _, err := e.runTurnLoop(context.Background(), job, steps, step, "fake-sandbox")
 	if err != nil {
 		t.Fatalf("runTurnLoop() error = %v, want the job to survive a schema-invalid call, not fail", err)
 	}
@@ -157,8 +204,9 @@ func TestExecutor_RunTurnLoop_TurnLimitExceeded(t *testing.T) {
 		provider.ScriptResponse(llm.Response{Model: "fake-model", ToolCalls: []llm.ToolCall{{ID: "1", Name: "fs_list", Input: lsArgs}}})
 	}
 	e := testExecutor(t, provider, newFakeSandbox(), &fakeTurnStore{})
+	job, step, steps := seedJobAndStep(t, requireIntegrationPool(t))
 
-	_, _, err := e.runTurnLoop(context.Background(), uuid.New(), queue.Step{ID: uuid.New(), Idx: 0}, "fake-sandbox", hardcodedPlan[0])
+	_, _, err := e.runTurnLoop(context.Background(), job, steps, step, "fake-sandbox")
 	if !errors.Is(err, ErrStepTurnLimitExceeded) {
 		t.Fatalf("runTurnLoop() error = %v, want ErrStepTurnLimitExceeded", err)
 	}
@@ -175,8 +223,9 @@ func TestExecutor_RunTurnLoop_NoToolCallPromptsRetry(t *testing.T) {
 		ScriptResponse(llm.Response{Model: "fake-model", Text: "I'm thinking about it."}).
 		ScriptResponse(llm.Response{Model: "fake-model", ToolCalls: []llm.ToolCall{stepDoneCall(t, true)}})
 	e := testExecutor(t, provider, newFakeSandbox(), &fakeTurnStore{})
+	job, step, steps := seedJobAndStep(t, requireIntegrationPool(t))
 
-	success, _, err := e.runTurnLoop(context.Background(), uuid.New(), queue.Step{ID: uuid.New(), Idx: 0}, "fake-sandbox", hardcodedPlan[0])
+	success, _, err := e.runTurnLoop(context.Background(), job, steps, step, "fake-sandbox")
 	if err != nil {
 		t.Fatalf("runTurnLoop() error = %v", err)
 	}
@@ -192,8 +241,9 @@ func TestExecutor_RunTurnLoop_AllowedCallPersistsTurnWithPolicyDecision(t *testi
 		ScriptResponse(llm.Response{Model: "fake-model", ToolCalls: []llm.ToolCall{stepDoneCall(t, true)}})
 	turns := &fakeTurnStore{}
 	e := testExecutor(t, provider, newFakeSandbox(), turns)
+	job, step, steps := seedJobAndStep(t, requireIntegrationPool(t))
 
-	if _, _, err := e.runTurnLoop(context.Background(), uuid.New(), queue.Step{ID: uuid.New(), Idx: 0}, "fake-sandbox", hardcodedPlan[0]); err != nil {
+	if _, _, err := e.runTurnLoop(context.Background(), job, steps, step, "fake-sandbox"); err != nil {
 		t.Fatalf("runTurnLoop() error = %v", err)
 	}
 

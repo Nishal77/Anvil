@@ -34,9 +34,19 @@ type LeaseGrant struct {
 // which requires every illegal edge to be rejected, not just the ones a
 // test happens to try.
 var allowedTransitions = map[Status]map[Status]bool{
-	StatusPendingPlan: {StatusPlanning: true},
-	StatusQueued:      {StatusRunning: true},
-	StatusPlanning:    {StatusPendingPlan: true, StatusAwaitingApproval: true, StatusFailed: true},
+	// Every non-terminal status also reaches CANCELLED (PRD §13.3): a
+	// job can be cancelled before planning starts, while planning is in
+	// flight, while queued waiting for a worker, or while awaiting
+	// approval — not only while RUNNING. Week 2 only exercised the
+	// RUNNING edge; the others are Week 7's completion of this graph,
+	// not new behavior for RUNNING itself.
+	StatusPendingPlan: {StatusPlanning: true, StatusCancelled: true},
+	StatusQueued:      {StatusRunning: true, StatusCancelled: true},
+	// PLANNING -> QUEUED is the auto-approve path (options.auto_approve,
+	// PRD §11): SavePlan skips AWAITING_APPROVAL entirely rather than
+	// routing through it and immediately approving, which would leave a
+	// visible but meaningless AWAITING_APPROVAL moment in the event log.
+	StatusPlanning: {StatusPendingPlan: true, StatusAwaitingApproval: true, StatusQueued: true, StatusFailed: true, StatusCancelled: true},
 	// RUNNING -> SUCCEEDED is not in the PRD §13.1 diagram directly, but is
 	// the real path for a job submitted with options.deploy = false
 	// (PRD §11.3) — such a job never enters DEPLOYING.

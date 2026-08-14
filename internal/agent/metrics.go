@@ -28,4 +28,23 @@ var (
 		Name: "agent_step_turns_total",
 		Help: "Executor turns run across all steps.",
 	})
+
+	// contextPressureTotal is PRD §12.3's proof the context budget is
+	// enforced, not aspirational: it increments every time ContextBuilder
+	// drops a tier to stay under MaxContextTokens. A benchmark run where
+	// this never fires means the budget was never actually tested.
+	contextPressureTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "anvil_context_pressure_total",
+		Help: "Times the context builder dropped a tier to stay within the token budget.",
+	})
+
+	repairAttemptsTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "agent_repair_attempts_total",
+		Help: "Repair turns issued after a step's tool call failed to satisfy its acceptance criterion.",
+	})
+
+	repairCapExceededTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "agent_repair_cap_exceeded_total",
+		Help: "Steps that exhausted their repair budget (FR-022) without recovering.",
+	})
 )

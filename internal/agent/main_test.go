@@ -58,6 +58,7 @@ func runTestMain(m *testing.M) int {
 		"../../migrations/002_jobs.up.sql",
 		"../../migrations/003_steps.up.sql",
 		"../../migrations/004_agent_turns.up.sql",
+		"../../migrations/008_planning.up.sql",
 	} {
 		sql, err := os.ReadFile(path)
 		if err != nil {

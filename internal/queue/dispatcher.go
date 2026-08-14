@@ -28,6 +28,13 @@ type Config struct {
 	// interface — Week 4 decides what actually drives sandbox+events;
 	// this week only needs something a test can control deterministically.
 	RunStep func(ctx context.Context, job *Job) error
+
+	// DestroySandbox force-destroys a sandbox by ID, by container/sandbox
+	// identifier alone — no job to hand off to, since the worker that
+	// owned it never acknowledged the cancel (PRD §13.3 step 5). Optional:
+	// nil is a no-op, so tests that don't exercise the wedged-worker path
+	// don't need to supply one.
+	DestroySandbox func(ctx context.Context, sandboxID string) error
 }
 
 func (c *Config) setDefaults() {
@@ -81,6 +88,7 @@ type Dispatcher struct {
 	heartbeatInterval time.Duration
 	sweepInterval     time.Duration
 	runStep           func(ctx context.Context, job *Job) error
+	destroySandbox    func(ctx context.Context, sandboxID string) error
 }
 
 // New constructs a Dispatcher from cfg, or returns an error if cfg is
@@ -100,6 +108,7 @@ func New(cfg Config) (*Dispatcher, error) {
 		heartbeatInterval: cfg.HeartbeatInterval,
 		sweepInterval:     cfg.SweepInterval,
 		runStep:           cfg.RunStep,
+		destroySandbox:    cfg.DestroySandbox,
 	}, nil
 }
 
@@ -179,6 +188,20 @@ func (d *Dispatcher) runJob(ctx context.Context, workerID string, job *Job) {
 		}
 		return
 	}
+
+	// runStep may already have moved the job on itself: the planner
+	// lands a claimed PLANNING job in AWAITING_APPROVAL or QUEUED, not
+	// SUCCEEDED, and a cancelled job lands in CANCELLED. Only
+	// auto-succeed a job still sitting in the status it was claimed
+	// into — anything else means runStep already wrote the real outcome.
+	current, err := getJob(ctx, d.pool, job.ID)
+	if err != nil {
+		d.log.ErrorContext(ctx, "reload job after run failed", slog.Any("err", err))
+		return
+	}
+	if current.Status != job.Status {
+		return
+	}
 	if err := Transition(ctx, d.pool, job.ID, job.Status, StatusSucceeded, JobStatusFields{}); err != nil {
 		d.log.ErrorContext(ctx, "transition to SUCCEEDED failed", slog.Any("err", err))
 	}
@@ -222,15 +245,32 @@ func (d *Dispatcher) sweepLoop(ctx context.Context) error {
 		case <-ctx.Done():
 			return nil
 		case <-d.clock.After(d.sweepInterval):
-			reclaimed, deadLettered, err := sweep(ctx, d.pool, d.clock)
+			reclaimed, deadLettered, cancelled, cancelledSandboxIDs, err := sweep(ctx, d.pool, d.clock)
 			if err != nil {
 				d.log.ErrorContext(ctx, "sweep failed", slog.Any("err", err))
 				continue
 			}
-			if reclaimed > 0 || deadLettered > 0 {
+			if reclaimed > 0 || deadLettered > 0 || cancelled > 0 {
 				d.log.InfoContext(ctx, "sweep completed",
-					slog.Int("reclaimed", reclaimed), slog.Int("dead_lettered", deadLettered))
+					slog.Int("reclaimed", reclaimed), slog.Int("dead_lettered", deadLettered), slog.Int("cancelled", cancelled))
 			}
+			d.destroyWedgedSandboxes(ctx, cancelledSandboxIDs)
+		}
+	}
+}
+
+// destroyWedgedSandboxes force-destroys every sandbox a wedged,
+// force-cancelled job left running (PRD §13.3 step 5). Best-effort: a
+// destroy failure is logged, not fatal to the sweep loop — the sandbox
+// will still be caught by the runner's own resource limits, and the job
+// itself has already reached CANCELLED regardless.
+func (d *Dispatcher) destroyWedgedSandboxes(ctx context.Context, sandboxIDs []string) {
+	if d.destroySandbox == nil {
+		return
+	}
+	for _, id := range sandboxIDs {
+		if err := d.destroySandbox(ctx, id); err != nil {
+			d.log.ErrorContext(ctx, "force-destroy wedged sandbox failed", slog.String("sandbox_id", id), slog.Any("err", err))
 		}
 	}
 }

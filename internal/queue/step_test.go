@@ -68,6 +68,82 @@ func TestStep_FinishStep_SetsStatusAndError(t *testing.T) {
 	}
 }
 
+func TestStep_IncrementRepairCount_AccumulatesAndReturnsNewValue(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	job := seedQueuedJob(t)
+	step, err := EnsureStep(ctx, testPool, job.ID, 0, "title", "description")
+	if err != nil {
+		t.Fatalf("EnsureStep: %v", err)
+	}
+
+	for want := 1; want <= 3; want++ {
+		got, err := IncrementRepairCount(ctx, testPool, step.ID)
+		if err != nil {
+			t.Fatalf("IncrementRepairCount: %v", err)
+		}
+		if got != want {
+			t.Errorf("IncrementRepairCount() = %d, want %d", got, want)
+		}
+	}
+
+	reread, err := EnsureStep(ctx, testPool, job.ID, 0, "title", "description")
+	if err != nil {
+		t.Fatalf("EnsureStep (read back): %v", err)
+	}
+	if reread.RepairCount != 3 {
+		t.Errorf("RepairCount = %d, want 3 — must be read from the row, not memory", reread.RepairCount)
+	}
+}
+
+func TestStep_IncrementTurnCount_Accumulates(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	job := seedQueuedJob(t)
+	step, err := EnsureStep(ctx, testPool, job.ID, 0, "title", "description")
+	if err != nil {
+		t.Fatalf("EnsureStep: %v", err)
+	}
+
+	for range 4 {
+		if err := IncrementTurnCount(ctx, testPool, step.ID); err != nil {
+			t.Fatalf("IncrementTurnCount: %v", err)
+		}
+	}
+
+	reread, err := EnsureStep(ctx, testPool, job.ID, 0, "title", "description")
+	if err != nil {
+		t.Fatalf("EnsureStep (read back): %v", err)
+	}
+	if reread.TurnCount != 4 {
+		t.Errorf("TurnCount = %d, want 4", reread.TurnCount)
+	}
+}
+
+func TestStep_ListSteps_ReturnsInIdxOrder(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	job := seedQueuedJob(t)
+	for _, idx := range []int{2, 0, 1} {
+		if _, err := EnsureStep(ctx, testPool, job.ID, idx, "title", "description"); err != nil {
+			t.Fatalf("EnsureStep(%d): %v", idx, err)
+		}
+	}
+
+	steps, err := ListSteps(ctx, testPool, job.ID)
+	if err != nil {
+		t.Fatalf("ListSteps: %v", err)
+	}
+	if len(steps) != 3 {
+		t.Fatalf("len(steps) = %d, want 3", len(steps))
+	}
+	for i, s := range steps {
+		if s.Idx != i {
+			t.Errorf("steps[%d].Idx = %d, want %d — ListSteps must return idx order", i, s.Idx, i)
+		}
+	}
+}
+
 func TestStep_EnsureStep_DifferentIdxAreIndependent(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

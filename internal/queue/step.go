@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -27,10 +28,35 @@ type Step struct {
 	Idx         int
 	Title       string
 	Description string
+	// Acceptance is how the executor knows this step succeeded (PRD
+	// §12.1) — surfaced to the model in the context builder's tier 3.
+	Acceptance string
+	// Optional, if true, means repair-exhaustion SKIPs this step
+	// instead of failing the whole job (PRD §12.4).
+	Optional    bool
 	Status      StepStatus
 	Error       string
+	RepairCount int
+	TurnCount   int
 	StartedAt   *time.Time
 	FinishedAt  *time.Time
+}
+
+const stepColumns = `id, job_id, idx, title, description, acceptance, optional,
+	status, COALESCE(error, ''), repair_count, turn_count, started_at, finished_at`
+
+func scanStep(row pgx.Row) (Step, error) {
+	var s Step
+	var status string
+	err := row.Scan(
+		&s.ID, &s.JobID, &s.Idx, &s.Title, &s.Description, &s.Acceptance, &s.Optional,
+		&status, &s.Error, &s.RepairCount, &s.TurnCount, &s.StartedAt, &s.FinishedAt,
+	)
+	if err != nil {
+		return Step{}, fmt.Errorf("queue: scan step: %w", err)
+	}
+	s.Status = StepStatus(status)
+	return s, nil
 }
 
 const ensureStepSQL = `
@@ -38,9 +64,7 @@ INSERT INTO steps (job_id, idx, title, description)
 VALUES ($1, $2, $3, $4)
 ON CONFLICT (job_id, idx) DO NOTHING`
 
-const getStepSQL = `
-SELECT id, job_id, idx, title, description, status, COALESCE(error, ''), started_at, finished_at
-FROM steps WHERE job_id = $1 AND idx = $2`
+const getStepSQL = `SELECT ` + stepColumns + ` FROM steps WHERE job_id = $1 AND idx = $2`
 
 // EnsureStep inserts a step row for (jobID, idx) if it doesn't already
 // exist, then returns the current row either way. This makes step
@@ -53,16 +77,60 @@ func EnsureStep(ctx context.Context, pool *pgxpool.Pool, jobID uuid.UUID, idx in
 		return Step{}, fmt.Errorf("queue: ensure step %s[%d]: %w", jobID, idx, err)
 	}
 
-	var s Step
-	var typ string
-	err := pool.QueryRow(ctx, getStepSQL, jobID, idx).Scan(
-		&s.ID, &s.JobID, &s.Idx, &s.Title, &s.Description, &typ, &s.Error, &s.StartedAt, &s.FinishedAt,
-	)
+	s, err := scanStep(pool.QueryRow(ctx, getStepSQL, jobID, idx))
 	if err != nil {
 		return Step{}, fmt.Errorf("queue: ensure step %s[%d]: read back: %w", jobID, idx, err)
 	}
-	s.Status = StepStatus(typ)
 	return s, nil
+}
+
+const listStepsSQL = `SELECT ` + stepColumns + ` FROM steps WHERE job_id = $1 ORDER BY idx`
+
+// ListSteps returns jobID's steps in plan order — the order SavePlan
+// wrote them and the order the executor must run them in.
+func ListSteps(ctx context.Context, pool *pgxpool.Pool, jobID uuid.UUID) ([]Step, error) {
+	rows, err := pool.Query(ctx, listStepsSQL, jobID)
+	if err != nil {
+		return nil, fmt.Errorf("queue: list steps for job %s: %w", jobID, err)
+	}
+	defer rows.Close()
+
+	var steps []Step
+	for rows.Next() {
+		s, err := scanStep(rows)
+		if err != nil {
+			return nil, fmt.Errorf("queue: list steps for job %s: scan: %w", jobID, err)
+		}
+		steps = append(steps, s)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("queue: list steps for job %s: %w", jobID, err)
+	}
+	return steps, nil
+}
+
+const incrementRepairCountSQL = `UPDATE steps SET repair_count = repair_count + 1 WHERE id = $1 RETURNING repair_count`
+
+// IncrementRepairCount records one more repair attempt on stepID and
+// returns the new count. Persisted on the row, not held in memory —
+// repair accounting must survive a crash-reclaim cycle, or a
+// crash-repair-crash loop never terminates (FR-022).
+func IncrementRepairCount(ctx context.Context, pool *pgxpool.Pool, stepID uuid.UUID) (int, error) {
+	var count int
+	if err := pool.QueryRow(ctx, incrementRepairCountSQL, stepID).Scan(&count); err != nil {
+		return 0, fmt.Errorf("queue: increment repair count for step %s: %w", stepID, err)
+	}
+	return count, nil
+}
+
+const incrementTurnCountSQL = `UPDATE steps SET turn_count = turn_count + 1 WHERE id = $1`
+
+// IncrementTurnCount records one more executor turn spent on stepID.
+func IncrementTurnCount(ctx context.Context, pool *pgxpool.Pool, stepID uuid.UUID) error {
+	if _, err := pool.Exec(ctx, incrementTurnCountSQL, stepID); err != nil {
+		return fmt.Errorf("queue: increment turn count for step %s: %w", stepID, err)
+	}
+	return nil
 }
 
 const startStepSQL = `

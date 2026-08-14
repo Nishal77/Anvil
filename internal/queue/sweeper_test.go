@@ -36,7 +36,7 @@ func TestFR012_ExpiredLeaseIsReclaimedAndAttemptIncrements(t *testing.T) {
 	// row's eventual state, not which sweep() invocation performed the
 	// write or whether this test's own read landed before that commit.
 	clk := &fakeClock{now: time.Now()}
-	if _, _, err := sweep(context.Background(), testPool, clk); err != nil {
+	if _, _, _, _, err := sweep(context.Background(), testPool, clk); err != nil {
 		t.Fatalf("sweep() error: %v", err)
 	}
 
@@ -69,7 +69,7 @@ func TestFR013_MaxAttemptsExceededDeadLettersWithSnapshot(t *testing.T) {
 	// counts or read immediately — a sibling's concurrent sweep() may
 	// have already handled this row in a transaction still committing.
 	clk := &fakeClock{now: time.Now()}
-	if _, _, err := sweep(context.Background(), testPool, clk); err != nil {
+	if _, _, _, _, err := sweep(context.Background(), testPool, clk); err != nil {
 		t.Fatalf("sweep() error: %v", err)
 	}
 
@@ -95,6 +95,37 @@ func TestFR013_MaxAttemptsExceededDeadLettersWithSnapshot(t *testing.T) {
 	}
 	if lastError == "" {
 		t.Error("dead_letter_jobs.last_error is empty")
+	}
+}
+
+// TestUS04_WedgedWorkerReachesCancelledViaLeaseExpiry proves PRD §13.3
+// step 5: a job whose worker never acknowledges a cancel request (the
+// worker is wedged, not just slow) still reaches CANCELLED once its
+// lease expires — cancellation does not depend on a live, cooperating
+// worker to complete.
+func TestUS04_WedgedWorkerReachesCancelledViaLeaseExpiry(t *testing.T) {
+	t.Parallel()
+	job := seedClaimedJob(t, "wedged-owner")
+	if err := RequestCancel(context.Background(), testPool, job.ID); err != nil {
+		t.Fatalf("RequestCancel: %v", err)
+	}
+	expireLeaseNow(t, job.ID)
+
+	clk := &fakeClock{now: time.Now()}
+	if _, _, _, _, err := sweep(context.Background(), testPool, clk); err != nil {
+		t.Fatalf("sweep() error: %v", err)
+	}
+
+	var got *Job
+	waitFor(t, 2*time.Second, func() bool {
+		var err error
+		got, err = getJob(context.Background(), testPool, job.ID)
+		return err == nil && got.Status == StatusCancelled
+	}, func() {
+		t.Fatal("wedged job was never force-cancelled by the sweeper")
+	})
+	if got.LeaseOwner != "" {
+		t.Errorf("LeaseOwner = %q, want cleared", got.LeaseOwner)
 	}
 }
 

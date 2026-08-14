@@ -77,8 +77,11 @@ func TestJobs_HandleCreateJob_Returns202WithIDAndEventsURL(t *testing.T) {
 	if resp.EventsURL == "" {
 		t.Error("response has no events_url")
 	}
-	if resp.Status != string(queue.StatusQueued) {
-		t.Errorf("Status = %q, want %q", resp.Status, queue.StatusQueued)
+	// The job starts in PENDING_PLAN: the Planner picks it up and lands
+	// it in AWAITING_APPROVAL or, with options.auto_approve, QUEUED
+	// (PRD §11, §13.1) — this request didn't set auto_approve.
+	if resp.Status != string(queue.StatusPendingPlan) {
+		t.Errorf("Status = %q, want %q", resp.Status, queue.StatusPendingPlan)
 	}
 
 	if len(pub.events) != 1 || pub.events[0] != "job_created" {
@@ -183,5 +186,119 @@ func TestJobs_HandleListJobs_ReturnsOnlyCallersJobs(t *testing.T) {
 	}
 	if len(resp) != 1 || resp[0].Prompt != "mine" {
 		t.Errorf("response = %+v, want exactly the caller's one job", resp)
+	}
+}
+
+// TestJobs_HandleApproveJob_TransitionsToQueued is US-02: approval is a
+// state transition, not just a UI acknowledgment.
+func TestJobs_HandleApproveJob_TransitionsToQueued(t *testing.T) {
+	t.Parallel()
+	userID := seedAPITestUser(t)
+	job, err := queue.CreateJob(context.Background(), testPool, userID, "my job", false)
+	if err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
+	seedClaimedPlanningJob(t, job.ID)
+	if err := queue.SavePlan(context.Background(), testPool, job.ID, "s", nil, []queue.PlannedStep{{Title: "t", Description: "d", Acceptance: "a"}}, false); err != nil {
+		t.Fatalf("SavePlan: %v", err)
+	}
+
+	srv := newJobsTestServer(t, userID, &fakePublisher{})
+	req := authedRequest(http.MethodPost, "/v1/jobs/"+job.ID.String()+"/approve", "")
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204; body: %s", rec.Code, rec.Body.String())
+	}
+
+	got, err := queue.GetJob(context.Background(), testPool, job.ID)
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if got.Status != queue.StatusQueued {
+		t.Errorf("Status = %s, want QUEUED", got.Status)
+	}
+}
+
+// TestJobs_HandleApproveJob_RejectsWrongState proves the state machine,
+// not the frontend, blocks approving a job that isn't AWAITING_APPROVAL
+// (INV-4).
+func TestJobs_HandleApproveJob_RejectsWrongState(t *testing.T) {
+	t.Parallel()
+	userID := seedAPITestUser(t)
+	job, err := queue.CreateJob(context.Background(), testPool, userID, "my job", false)
+	if err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
+
+	srv := newJobsTestServer(t, userID, &fakePublisher{})
+	req := authedRequest(http.MethodPost, "/v1/jobs/"+job.ID.String()+"/approve", "")
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Errorf("status = %d, want 409 for a job still in PENDING_PLAN", rec.Code)
+	}
+}
+
+// TestJobs_HandleCancelJob_SetsCancelRequested is PRD §13.3 step 1.
+func TestJobs_HandleCancelJob_SetsCancelRequested(t *testing.T) {
+	t.Parallel()
+	userID := seedAPITestUser(t)
+	job, err := queue.CreateQueuedJob(context.Background(), testPool, userID, "my job")
+	if err != nil {
+		t.Fatalf("CreateQueuedJob: %v", err)
+	}
+
+	srv := newJobsTestServer(t, userID, &fakePublisher{})
+	req := authedRequest(http.MethodPost, "/v1/jobs/"+job.ID.String()+"/cancel", "")
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204; body: %s", rec.Code, rec.Body.String())
+	}
+
+	requested, err := queue.IsCancelRequested(context.Background(), testPool, job.ID)
+	if err != nil {
+		t.Fatalf("IsCancelRequested: %v", err)
+	}
+	if !requested {
+		t.Error("cancel_requested_at was not set")
+	}
+}
+
+// TestJobs_HandleCancelJob_NotFoundForAnotherUsersJob proves cancel
+// respects ownership the same way every other job endpoint does.
+func TestJobs_HandleCancelJob_NotFoundForAnotherUsersJob(t *testing.T) {
+	t.Parallel()
+	owner := seedAPITestUser(t)
+	caller := seedAPITestUser(t)
+	job, err := queue.CreateQueuedJob(context.Background(), testPool, owner, "not mine")
+	if err != nil {
+		t.Fatalf("CreateQueuedJob: %v", err)
+	}
+
+	srv := newJobsTestServer(t, caller, &fakePublisher{})
+	req := authedRequest(http.MethodPost, "/v1/jobs/"+job.ID.String()+"/cancel", "")
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", rec.Code)
+	}
+}
+
+// seedClaimedPlanningJob moves job (already PENDING_PLAN via CreateJob)
+// into PLANNING with a lease, directly — the state SavePlan expects to
+// transition out of, without needing a real Planner run in this test.
+func seedClaimedPlanningJob(t *testing.T, jobID uuid.UUID) {
+	t.Helper()
+	_, err := testPool.Exec(context.Background(),
+		`UPDATE jobs SET status = 'PLANNING', lease_owner = 'test', lease_expires_at = now() + interval '1 minute' WHERE id = $1`,
+		jobID)
+	if err != nil {
+		t.Fatalf("seedClaimedPlanningJob: %v", err)
 	}
 }

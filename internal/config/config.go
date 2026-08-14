@@ -19,6 +19,7 @@ const (
 	defaultOpenAIModel      = "gpt-4o-mini"
 	defaultMonthlyUSDCap    = 10
 	usdMicrosPerUSD         = 1_000_000
+	defaultMaxSteps         = 12
 )
 
 // Config holds process-wide configuration loaded from the environment.
@@ -42,6 +43,9 @@ type Config struct {
 	// MonthlyUSDCapMicros is ANVIL_MONTHLY_USD_CAP (whole USD) converted
 	// to micros — FR-034's global spend ceiling.
 	MonthlyUSDCapMicros int64
+	// MaxSteps is ANVIL_MAX_STEPS — the Planner's code-enforced ceiling
+	// on plan size (PRD §12.1), never merely requested in the prompt.
+	MaxSteps int
 }
 
 // LogValue redacts JWTSigningKey and every API key so a careless
@@ -62,6 +66,7 @@ func (c Config) LogValue() slog.Value {
 		slog.Bool("openai_configured", c.OpenAIAPIKey != ""),
 		slog.String("openai_model", c.OpenAIModel),
 		slog.Int64("monthly_usd_cap_micros", c.MonthlyUSDCapMicros),
+		slog.Int("max_steps", c.MaxSteps),
 	)
 }
 
@@ -83,6 +88,15 @@ func Load() (Config, error) {
 		OpenAIAPIKey:        os.Getenv("ANVIL_OPENAI_API_KEY"),
 		OpenAIModel:         envOr("ANVIL_OPENAI_MODEL", defaultOpenAIModel),
 		MonthlyUSDCapMicros: defaultMonthlyUSDCap * usdMicrosPerUSD,
+		MaxSteps:            defaultMaxSteps,
+	}
+
+	if v := os.Getenv("ANVIL_MAX_STEPS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return Config{}, fmt.Errorf("config: parse ANVIL_MAX_STEPS: %w", err)
+		}
+		cfg.MaxSteps = n
 	}
 
 	if v := os.Getenv("DATABASE_MAX_CONNS"); v != "" {

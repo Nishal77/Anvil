@@ -103,6 +103,8 @@ func New(cfg Config) (*Server, error) {
 	mux.Handle("POST /v1/jobs", requireAuth(cfg.Auth)(http.HandlerFunc(s.handleCreateJob)))
 	mux.Handle("GET /v1/jobs", requireAuth(cfg.Auth)(http.HandlerFunc(s.handleListJobs)))
 	mux.Handle("GET /v1/jobs/{id}", requireAuth(cfg.Auth)(http.HandlerFunc(s.handleGetJob)))
+	mux.Handle("POST /v1/jobs/{id}/approve", requireAuth(cfg.Auth)(http.HandlerFunc(s.handleApproveJob)))
+	mux.Handle("POST /v1/jobs/{id}/cancel", requireAuth(cfg.Auth)(http.HandlerFunc(s.handleCancelJob)))
 	mux.Handle("GET /v1/jobs/{id}/events", requireAuthSSE(cfg.Auth)(http.HandlerFunc(s.handleJobEvents)))
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /readyz", s.handleReadyz)
