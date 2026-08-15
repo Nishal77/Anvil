@@ -1,8 +1,10 @@
 package sandbox
 
 import (
+	"archive/tar"
 	"bufio"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -170,28 +172,112 @@ const exportWorkspaceTimeout = 60 * time.Second
 // tens of megabytes of object files) — it is disposable compiler
 // state, not part of the deliverable, and including it was found live
 // to be large enough to matter for export reliability besides.
-const exportWorkspaceCommand = "tar czf - -C /workspace --exclude=.cache . | base64"
+//
+// set -o pipefail is not optional here. Without it, a `tar | base64`
+// pipeline's exit code is base64's alone: if tar dies partway through
+// for any reason, base64 still happily encodes whatever partial bytes
+// it received and exits 0 — producing perfectly valid, perfectly
+// truncated base64 of a broken gzip stream, silently. This was found
+// live: the exec itself reported success while the extracted artifact
+// failed with "unexpected EOF" partway through a file. With pipefail,
+// tar's failure becomes the pipeline's failure, which ExportWorkspace
+// below now actually checks instead of trusting a decodable payload
+// to mean a complete one.
+const exportWorkspaceCommand = "set -o pipefail; tar czf - -C /workspace --exclude=.cache . | base64"
+
+// exportWorkspaceAttempts is how many times ExportWorkspace retries a
+// corrupted transfer before giving up. Found live, twice, even after
+// fixing two confirmed contributing bugs (a tool-call ID mismatch
+// unrelated to this path, and an unchecked tar failure via a
+// non-pipefail pipeline): occasionally the base64 text captured over
+// the exec streaming protocol is itself invalid — not just short, but
+// containing bytes outside the base64 alphabet — under real load (a
+// long-running compile immediately before the export command). The
+// exact mechanism inside Docker's exec attach demuxing wasn't
+// isolated further within reasonable effort; retrying a fresh export
+// (a new tar/base64/exec run, not a resend of the same bytes) and
+// verifying the result decompresses cleanly before accepting it is
+// the honest mitigation for a confirmed-live, not-fully-root-caused
+// intermittent transport fault, not a substitute for finding the real
+// cause if it recurs enough to justify more investigation.
+const exportWorkspaceAttempts = 3
 
 // ExportWorkspace returns sandboxID's /workspace as a gzipped tar
 // archive. Called before Destroy on every terminal path (SUCCEEDED,
 // FAILED, CANCELLED) — a job's artifact is preserved regardless of why
 // it ended (ADR-012).
 func (c *Client) ExportWorkspace(ctx context.Context, sandboxID string) (io.ReadCloser, error) {
+	var lastErr error
+	for attempt := 1; attempt <= exportWorkspaceAttempts; attempt++ {
+		decoded, err := c.exportWorkspaceOnce(ctx, sandboxID)
+		if err == nil {
+			return io.NopCloser(bytes.NewReader(decoded)), nil
+		}
+		lastErr = err
+		c.log.WarnContext(ctx, "export workspace attempt failed", slog.String("sandbox_id", sandboxID), slog.Int("attempt", attempt), slog.Any("err", err))
+	}
+	return nil, fmt.Errorf("sandbox: export workspace: %d attempts failed, last error: %w", exportWorkspaceAttempts, lastErr)
+}
+
+// exportWorkspaceOnce runs exportWorkspaceCommand once and validates
+// the result is a complete, readable gzip+tar stream before returning
+// it — decodability alone is not proof of completeness (a pipeline
+// that failed partway can still produce syntactically valid, merely
+// truncated, base64 — the exact bug pipefail above closes one way
+// into) so this reads the archive all the way through instead of
+// trusting the byte count.
+func (c *Client) exportWorkspaceOnce(ctx context.Context, sandboxID string) ([]byte, error) {
 	var b64 strings.Builder
+	var exitCode int
 	err := c.Exec(ctx, sandboxID, exportWorkspaceCommand, exportWorkspaceTimeout, func(chunk ExecChunk) {
 		if chunk.Stream == "stdout" {
 			b64.Write(chunk.Data)
 		}
+		if chunk.Final {
+			exitCode = chunk.ExitCode
+		}
 	})
 	if err != nil {
-		return nil, fmt.Errorf("sandbox: export workspace: %w", err)
+		return nil, fmt.Errorf("exec: %w", err)
+	}
+	if exitCode != 0 {
+		return nil, fmt.Errorf("command exited %d", exitCode)
 	}
 
 	decoded, err := base64.StdEncoding.DecodeString(b64.String())
 	if err != nil {
-		return nil, fmt.Errorf("sandbox: export workspace: decode: %w", err)
+		return nil, fmt.Errorf("decode: %w", err)
 	}
-	return io.NopCloser(bytes.NewReader(decoded)), nil
+	if err := verifyTarGz(decoded); err != nil {
+		return nil, fmt.Errorf("verify: %w", err)
+	}
+	return decoded, nil
+}
+
+// verifyTarGz reads archive all the way to its end, discarding
+// content, to confirm the gzip stream and every tar entry in it are
+// complete — the only way to distinguish a genuinely finished archive
+// from one that merely decoded without a base64-level error.
+func verifyTarGz(archive []byte) error {
+	gz, err := gzip.NewReader(bytes.NewReader(archive))
+	if err != nil {
+		return fmt.Errorf("open gzip stream: %w", err)
+	}
+	defer func() { _ = gz.Close() }()
+
+	tr := tar.NewReader(gz)
+	for {
+		header, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("read tar entry: %w", err)
+		}
+		if _, err := io.Copy(io.Discard, tr); err != nil {
+			return fmt.Errorf("read content of %s: %w", header.Name, err)
+		}
+	}
 }
 
 // Destroy tears down sandboxID. Safe to call on an already-destroyed or

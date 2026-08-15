@@ -58,3 +58,27 @@ Pass rate: 20% (1/5) · mean cost: $0.0516 · mean duration: 1m36.323s · p95 in
 | is-palindrome | trivial | FAIL | $0.0626 | 1m48.286s | 45195 | 3489 |
 | reverse-string | trivial | FAIL | $0.0339 | 53.678s | 26472 | 1487 |
 | word-count | trivial | FAIL | $0.0823 | 3m1.471s | 61733 | 4113 |
+
+## 2026-08-15
+
+Pass rate: 60% (3/5) · mean cost: $0.0617 · mean duration: 2m20.058s · p95 input tokens: 95516
+
+| Task | Tier | Result | Cost (USD) | Duration | Input tokens | Output tokens |
+|---|---|---|---|---|---|---|
+| fizzbuzz | trivial | PASS | $0.0595 | 3m10.711s | 41337 | 3631 |
+| hello-world | trivial | PASS | $0.0414 | 1m24.8s | 29983 | 2286 |
+| is-palindrome | trivial | PASS | $0.0462 | 1m23.203s | 32273 | 2792 |
+| reverse-string | trivial | FAIL | $0.1261 | 4m47.839s | 95516 | 6115 |
+| word-count | trivial | FAIL | $0.0351 | 53.739s | 27484 | 1522 |
+
+## 2026-08-15
+
+Pass rate: 60% (3/5) · mean cost: $0.0557 · mean duration: 1m33.29s · p95 input tokens: 55565
+
+| Task | Tier | Result | Cost (USD) | Duration | Input tokens | Output tokens |
+|---|---|---|---|---|---|---|
+| fizzbuzz | trivial | FAIL | $0.0762 | 2m4.193s | 55565 | 4137 |
+| hello-world | trivial | PASS | $0.0550 | 1m43.371s | 41689 | 2657 |
+| is-palindrome | trivial | PASS | $0.0699 | 1m55.939s | 47592 | 4456 |
+| reverse-string | trivial | FAIL | $0.0402 | 1m4.184s | 30949 | 1848 |
+| word-count | trivial | PASS | $0.0374 | 58.765s | 23038 | 2878 |
