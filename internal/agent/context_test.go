@@ -6,6 +6,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/anvil-dev/anvil/internal/llm"
 	"github.com/anvil-dev/anvil/internal/queue"
 	"github.com/anvil-dev/anvil/internal/storage"
 )
@@ -85,6 +86,38 @@ func TestContextBuilder_EmitsContextPressureOnDrop(t *testing.T) {
 	after := testCounterValue(t, contextPressureTotal)
 	if after <= before {
 		t.Errorf("contextPressureTotal did not increment: before=%v after=%v", before, after)
+	}
+}
+
+// TestContextBuilder_ToolCallAndResultShareID proves the replayed
+// assistant/tool message pair for a verbatim turn share one ID. A
+// mismatch here (previously: the assistant side had no ID at all, and
+// the tool side carried the tool NAME instead) is invisible to every
+// test using llm.FakeProvider (which ignores request content), but a
+// real provider like Anthropic hard-rejects a tool_result whose
+// tool_use_id doesn't match the preceding tool_use block — a live-run
+// failure that only a real API call surfaces.
+func TestContextBuilder_ToolCallAndResultShareID(t *testing.T) {
+	turnID := uuid.New()
+	turns := []storage.AgentTurn{{ID: turnID, ToolName: "exec", Observation: "exit code: 0"}}
+
+	b := NewContextBuilder(defaultMaxContextTokens, nil)
+	req, _ := b.Build(testBuildInput(turns, nil))
+
+	var assistantID, toolCallID string
+	for _, m := range req.Messages {
+		if m.Role == llm.RoleAssistant && len(m.ToolCalls) > 0 {
+			assistantID = m.ToolCalls[0].ID
+		}
+		if m.Role == llm.RoleTool {
+			toolCallID = m.ToolCallID
+		}
+	}
+	if assistantID == "" {
+		t.Fatal("assistant ToolCalls[0].ID is empty")
+	}
+	if assistantID != toolCallID {
+		t.Errorf("assistant tool_use ID = %q, tool_result ToolCallID = %q — must match", assistantID, toolCallID)
 	}
 }
 

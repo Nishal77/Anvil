@@ -142,6 +142,8 @@ func TestConfig_Load_MissingRedisURLFails(t *testing.T) {
 func setRequiredBenchEnv(t *testing.T) {
 	t.Helper()
 	t.Setenv("ANVIL_ANTHROPIC_API_KEY", "test-key-not-real")
+	t.Setenv("DATABASE_URL", "postgres://anvil:anvil@localhost:5432/anvil_test?sslmode=disable")
+	t.Setenv("ANVIL_S3_ENDPOINT", "localhost:9000")
 }
 
 func TestLoadBench_AppliesDefaults(t *testing.T) {
@@ -173,6 +175,8 @@ func TestLoadBench_OpenAIKeyAloneSatisfiesRequirement(t *testing.T) {
 	t.Setenv("ANVIL_GEMINI_API_KEY", "")
 	t.Setenv("ANVIL_ANTHROPIC_API_KEY", "")
 	t.Setenv("ANVIL_OPENAI_API_KEY", "test-key-not-real")
+	t.Setenv("DATABASE_URL", "postgres://anvil:anvil@localhost:5432/anvil_test?sslmode=disable")
+	t.Setenv("ANVIL_S3_ENDPOINT", "localhost:9000")
 
 	cfg, err := LoadBench()
 	if err != nil {

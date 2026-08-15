@@ -46,6 +46,15 @@ type Config struct {
 	// MaxSteps is ANVIL_MAX_STEPS — the Planner's code-enforced ceiling
 	// on plan size (PRD §12.1), never merely requested in the prompt.
 	MaxSteps int
+	// Artifact storage (PRD §8.2). Endpoint is host:port, no scheme —
+	// all optional: an unset Endpoint means artifact upload/download is
+	// skipped entirely rather than failing startup, so a deployment
+	// without object storage configured still runs everything else.
+	S3Endpoint  string
+	S3Bucket    string
+	S3AccessKey string
+	S3SecretKey string
+	S3UseSSL    bool
 }
 
 // LogValue redacts JWTSigningKey and every API key so a careless
@@ -67,6 +76,8 @@ func (c Config) LogValue() slog.Value {
 		slog.String("openai_model", c.OpenAIModel),
 		slog.Int64("monthly_usd_cap_micros", c.MonthlyUSDCapMicros),
 		slog.Int("max_steps", c.MaxSteps),
+		slog.Bool("s3_configured", c.S3Endpoint != ""),
+		slog.String("s3_bucket", c.S3Bucket),
 	)
 }
 
@@ -89,6 +100,11 @@ func Load() (Config, error) {
 		OpenAIModel:         envOr("ANVIL_OPENAI_MODEL", defaultOpenAIModel),
 		MonthlyUSDCapMicros: defaultMonthlyUSDCap * usdMicrosPerUSD,
 		MaxSteps:            defaultMaxSteps,
+		S3Endpoint:          os.Getenv("ANVIL_S3_ENDPOINT"),
+		S3Bucket:            envOr("ANVIL_S3_BUCKET", "anvil-artifacts"),
+		S3AccessKey:         os.Getenv("ANVIL_S3_ACCESS_KEY"),
+		S3SecretKey:         os.Getenv("ANVIL_S3_SECRET_KEY"),
+		S3UseSSL:            os.Getenv("ANVIL_S3_USE_SSL") == "true",
 	}
 
 	if v := os.Getenv("ANVIL_MAX_STEPS"); v != "" {
@@ -142,26 +158,42 @@ func (c Config) validate() error {
 
 // BenchConfig holds cmd/anvilctl's "bench" subcommand configuration
 // (PRD §20.5). Deliberately separate from Config: the benchmark
-// harness has no Postgres, Redis, or JWT dependency, so it must not
-// share Config.validate's requirement that those be set.
+// harness drives the real Planner+Executor pipeline (Postgres, object
+// storage for artifact verification) but has no Redis, HTTP, or JWT
+// dependency, so it must not share Config.validate's requirement that
+// those be set.
 type BenchConfig struct {
-	RunnerAddr      string
-	GeminiAPIKey    string
-	GeminiModel     string
-	AnthropicAPIKey string
-	OpenAIAPIKey    string
-	OpenAIModel     string
+	DatabaseURL      string
+	DatabaseMaxConns int32
+	RunnerAddr       string
+	GeminiAPIKey     string
+	GeminiModel      string
+	AnthropicAPIKey  string
+	OpenAIAPIKey     string
+	OpenAIModel      string
+	MaxSteps         int
+	// Object storage: required, not optional, unlike Config's — a
+	// benchmark run that can't download the artifact can't verify a
+	// task's check command, which makes the whole run meaningless.
+	S3Endpoint  string
+	S3Bucket    string
+	S3AccessKey string
+	S3SecretKey string
+	S3UseSSL    bool
 }
 
 // LogValue redacts every API key (CLAUDE.md I-3).
 func (c BenchConfig) LogValue() slog.Value {
 	return slog.GroupValue(
+		slog.String("database_url", c.DatabaseURL),
 		slog.String("runner_addr", c.RunnerAddr),
 		slog.Bool("gemini_configured", c.GeminiAPIKey != ""),
 		slog.String("gemini_model", c.GeminiModel),
 		slog.Bool("anthropic_configured", c.AnthropicAPIKey != ""),
 		slog.Bool("openai_configured", c.OpenAIAPIKey != ""),
 		slog.String("openai_model", c.OpenAIModel),
+		slog.Bool("s3_configured", c.S3Endpoint != ""),
+		slog.String("s3_bucket", c.S3Bucket),
 	)
 }
 
@@ -170,15 +202,29 @@ func (c BenchConfig) LogValue() slog.Value {
 // call otherwise.
 func LoadBench() (BenchConfig, error) {
 	cfg := BenchConfig{
-		RunnerAddr:      envOr("ANVIL_RUNNER_URL", defaultRunnerAddr),
-		GeminiAPIKey:    os.Getenv("ANVIL_GEMINI_API_KEY"),
-		GeminiModel:     envOr("ANVIL_GEMINI_MODEL", defaultGeminiModel),
-		AnthropicAPIKey: os.Getenv("ANVIL_ANTHROPIC_API_KEY"),
-		OpenAIAPIKey:    os.Getenv("ANVIL_OPENAI_API_KEY"),
-		OpenAIModel:     envOr("ANVIL_OPENAI_MODEL", defaultOpenAIModel),
+		DatabaseURL:      os.Getenv("DATABASE_URL"),
+		DatabaseMaxConns: defaultDatabaseMaxConns,
+		RunnerAddr:       envOr("ANVIL_RUNNER_URL", defaultRunnerAddr),
+		GeminiAPIKey:     os.Getenv("ANVIL_GEMINI_API_KEY"),
+		GeminiModel:      envOr("ANVIL_GEMINI_MODEL", defaultGeminiModel),
+		AnthropicAPIKey:  os.Getenv("ANVIL_ANTHROPIC_API_KEY"),
+		OpenAIAPIKey:     os.Getenv("ANVIL_OPENAI_API_KEY"),
+		OpenAIModel:      envOr("ANVIL_OPENAI_MODEL", defaultOpenAIModel),
+		MaxSteps:         defaultMaxSteps,
+		S3Endpoint:       os.Getenv("ANVIL_S3_ENDPOINT"),
+		S3Bucket:         envOr("ANVIL_S3_BUCKET", "anvil-artifacts"),
+		S3AccessKey:      os.Getenv("ANVIL_S3_ACCESS_KEY"),
+		S3SecretKey:      os.Getenv("ANVIL_S3_SECRET_KEY"),
+		S3UseSSL:         os.Getenv("ANVIL_S3_USE_SSL") == "true",
 	}
 	if cfg.GeminiAPIKey == "" && cfg.AnthropicAPIKey == "" && cfg.OpenAIAPIKey == "" {
 		return BenchConfig{}, fmt.Errorf("config: set at least one of ANVIL_GEMINI_API_KEY, ANVIL_ANTHROPIC_API_KEY, ANVIL_OPENAI_API_KEY")
+	}
+	if cfg.DatabaseURL == "" {
+		return BenchConfig{}, fmt.Errorf("config: DATABASE_URL is required")
+	}
+	if cfg.S3Endpoint == "" {
+		return BenchConfig{}, fmt.Errorf("config: ANVIL_S3_ENDPOINT is required — the benchmark harness verifies a task by downloading its artifact")
 	}
 	return cfg, nil
 }

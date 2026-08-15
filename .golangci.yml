@@ -79,6 +79,15 @@ linters:
         linters:
           - forbidigo
         text: "os\\.Getenv"
+      # cmd/anvilctl is a CLI, not a server: printing to stdout IS its
+      # product (job status, the artifact download hint), not a logging
+      # concern log/slog exists to replace. Its --email/--password flags
+      # fall back to ANVIL_EMAIL/ANVIL_PASSWORD for convenience — the
+      # same "own, unrelated settings" reasoning as cmd/runner/main.go
+      # above, not a config.Config field for a value nothing else reads.
+      - path: cmd/anvilctl/(run|cancel|client)\.go
+        linters:
+          - forbidigo
 
 issues:
   max-issues-per-linter: 0

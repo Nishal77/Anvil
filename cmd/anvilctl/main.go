@@ -19,6 +19,10 @@ func main() {
 	switch os.Args[1] {
 	case "bench":
 		err = runBench(context.Background(), os.Args[2:])
+	case "run":
+		err = runRun(context.Background(), os.Args[2:])
+	case "cancel":
+		err = runCancel(context.Background(), os.Args[2:])
 	default:
 		err = fmt.Errorf("unknown command %q", os.Args[1])
 	}

@@ -2,6 +2,7 @@ package runner
 
 import (
 	"bufio"
+	"fmt"
 	"io"
 	"regexp"
 )
@@ -22,10 +23,13 @@ const maxScanTokenBytes = 1 << 20 // 1 MiB
 // scanLines reads r one line at a time and calls onChunk for each line
 // right as it's produced — it's never held back until the command
 // finishes. It returns once r hits the end of input (the normal case,
-// once the writer side closes) or hits a real read error. Either way,
-// the caller finds out the command actually finished from its exit code,
-// not from this function returning.
-func scanLines(r io.Reader, stream string, onChunk func(stream string, data []byte)) {
+// once the writer side closes) or hits a read error, including a line
+// longer than maxScanTokenBytes (bufio.ErrTooLong) — returned rather
+// than swallowed, since a caller that never learns the stream was cut
+// short would report the command as having succeeded with silently
+// truncated output. The caller still finds out the command actually
+// finished from its exit code, not from this function returning.
+func scanLines(r io.Reader, stream string, onChunk func(stream string, data []byte)) error {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), maxScanTokenBytes)
 	for scanner.Scan() {
@@ -37,4 +41,8 @@ func scanLines(r io.Reader, stream string, onChunk func(stream string, data []by
 		// Scan() call.
 		onChunk(stream, append([]byte(nil), scanner.Bytes()...))
 	}
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("runner: scan %s: %w", stream, err)
+	}
+	return nil
 }

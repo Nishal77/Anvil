@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/anvil-dev/anvil/internal/auth"
 )
@@ -35,6 +36,10 @@ type Config struct {
 	EventStore eventStore
 	Publisher  eventPublisher
 	Logger     *slog.Logger
+	// Artifacts serves a job's uploaded workspace archive. Optional:
+	// nil means GET .../artifact always 503s — a deployment without
+	// object storage configured still runs everything else.
+	Artifacts artifactDownloader
 }
 
 func (c Config) validate() error {
@@ -76,6 +81,7 @@ type Server struct {
 	hub        eventHub
 	eventStore eventStore
 	publisher  eventPublisher
+	artifacts  artifactDownloader
 	log        *slog.Logger
 }
 
@@ -92,6 +98,7 @@ func New(cfg Config) (*Server, error) {
 		hub:        cfg.Hub,
 		eventStore: cfg.EventStore,
 		publisher:  cfg.Publisher,
+		artifacts:  cfg.Artifacts,
 		log:        cfg.Logger,
 	}
 
@@ -106,8 +113,10 @@ func New(cfg Config) (*Server, error) {
 	mux.Handle("POST /v1/jobs/{id}/approve", requireAuth(cfg.Auth)(http.HandlerFunc(s.handleApproveJob)))
 	mux.Handle("POST /v1/jobs/{id}/cancel", requireAuth(cfg.Auth)(http.HandlerFunc(s.handleCancelJob)))
 	mux.Handle("GET /v1/jobs/{id}/events", requireAuthSSE(cfg.Auth)(http.HandlerFunc(s.handleJobEvents)))
+	mux.Handle("GET /v1/jobs/{id}/artifact", requireAuth(cfg.Auth)(http.HandlerFunc(s.handleDownloadArtifact)))
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /readyz", s.handleReadyz)
+	mux.Handle("GET /metrics", promhttp.Handler())
 
 	handler := cors(traceID(recoverPanic(cfg.Logger)(mux)))
 

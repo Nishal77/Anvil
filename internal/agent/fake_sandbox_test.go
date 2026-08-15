@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"io"
 	"strings"
 	"sync"
 	"time"
@@ -42,6 +43,13 @@ func (f *fakeSandbox) Destroy(context.Context, string) error {
 	defer f.mu.Unlock()
 	f.destroyed++
 	return nil
+}
+
+// ExportWorkspace returns an empty archive — no test in this package
+// exercises artifact content, only that upload was attempted (via a
+// fakeArtifactStore, where used).
+func (f *fakeSandbox) ExportWorkspace(context.Context, string) (io.ReadCloser, error) {
+	return io.NopCloser(strings.NewReader("")), nil
 }
 
 func (f *fakeSandbox) Exec(_ context.Context, _ string, command string, _ time.Duration, onChunk func(sandbox.ExecChunk)) error {

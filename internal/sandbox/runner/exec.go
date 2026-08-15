@@ -105,10 +105,11 @@ func runInGroup(ctx context.Context, cli dockerExecClient, containerID, command 
 		copyDone <- copyErr
 	}()
 
+	scanErrs := make(chan error, 2)
 	var scanWG sync.WaitGroup
 	scanWG.Add(2)
-	go func() { defer scanWG.Done(); scanLines(stdoutR, "stdout", onChunk) }()
-	go func() { defer scanWG.Done(); scanLines(stderrR, "stderr", onChunk) }()
+	go func() { defer scanWG.Done(); scanErrs <- scanLines(stdoutR, "stdout", onChunk) }()
+	go func() { defer scanWG.Done(); scanErrs <- scanLines(stderrR, "stderr", onChunk) }()
 
 	result := waitForExecOrTimeout(ctx, cli, created.ID, containerID, pidFile, timeout, execGracePeriod)
 
@@ -123,6 +124,16 @@ func runInGroup(ctx context.Context, cli dockerExecClient, containerID, command 
 
 	<-copyDone
 	scanWG.Wait()
+	close(scanErrs)
+	// A truncated stream (a line over maxScanTokenBytes, most plausibly
+	// — see stream.go) must not be reported as a clean, complete exit:
+	// a caller trusting the output was whole would act on silently
+	// missing data instead of finding out the stream was cut short.
+	for err := range scanErrs {
+		if err != nil {
+			return result.exitCode, fmt.Errorf("runner: read command output: %w", err)
+		}
+	}
 
 	if result.timedOut {
 		return result.exitCode, sandbox.ErrCommandTimeout

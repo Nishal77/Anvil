@@ -17,6 +17,7 @@ import (
 
 	"github.com/anvil-dev/anvil/internal/agent"
 	"github.com/anvil-dev/anvil/internal/api"
+	"github.com/anvil-dev/anvil/internal/artifact"
 	"github.com/anvil-dev/anvil/internal/auth"
 	"github.com/anvil-dev/anvil/internal/config"
 	"github.com/anvil-dev/anvil/internal/events"
@@ -129,7 +130,12 @@ func wireControlPlane(ctx context.Context, cfg config.Config, log *slog.Logger) 
 		return nil, fmt.Errorf("construct sandbox client: %w", err)
 	}
 
-	exec, planner, err := wireAgent(ctx, cfg, sandboxClient, publisher, store, log)
+	artifacts, err := wireArtifacts(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	exec, planner, err := wireAgent(ctx, cfg, sandboxClient, publisher, store, artifacts, log)
 	if err != nil {
 		return nil, err
 	}
@@ -144,7 +150,19 @@ func wireControlPlane(ctx context.Context, cfg config.Config, log *slog.Logger) 
 		return nil, fmt.Errorf("construct dispatcher: %w", err)
 	}
 
-	server, err := api.New(api.Config{
+	server, err := api.New(wireAPIConfig(cfg, authSvc, store, hub, publisher, artifacts, log))
+	if err != nil {
+		return nil, fmt.Errorf("construct api server: %w", err)
+	}
+
+	return &controlPlane{store: store, redis: redisClient, dispatcher: dispatcher, hub: hub, server: server}, nil
+}
+
+// wireAPIConfig builds api.Config. Split out of wireControlPlane purely
+// to keep that function's branching under CLAUDE.md's cyclomatic-
+// complexity limit — no behavior difference from inlining it.
+func wireAPIConfig(cfg config.Config, authSvc *auth.Service, store *storage.Store, hub *events.Hub, publisher *events.Publisher, artifacts *artifact.Store, log *slog.Logger) api.Config {
+	apiCfg := api.Config{
 		Addr:       cfg.HTTPAddr,
 		Auth:       authSvc,
 		Store:      store,
@@ -153,12 +171,17 @@ func wireControlPlane(ctx context.Context, cfg config.Config, log *slog.Logger) 
 		EventStore: store,
 		Publisher:  publisher,
 		Logger:     log,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("construct api server: %w", err)
 	}
-
-	return &controlPlane{store: store, redis: redisClient, dispatcher: dispatcher, hub: hub, server: server}, nil
+	// artifacts is a typed *artifact.Store; assigning it into an
+	// interface-typed Config field even when nil produces a non-nil
+	// interface wrapping a nil pointer (the classic Go pitfall), which
+	// would make api.Server's own artifacts==nil check pass right
+	// through to a nil-pointer Download call. Only assign when it's
+	// genuinely non-nil.
+	if artifacts != nil {
+		apiCfg.Artifacts = artifacts
+	}
+	return apiCfg
 }
 
 // wireAgent builds the agent.Executor and agent.Planner: the tool
@@ -167,7 +190,7 @@ func wireControlPlane(ctx context.Context, cfg config.Config, log *slog.Logger) 
 // configured provider ladder (shared across TaskExecution, TaskPlanning,
 // and TaskSummarization — Anvil has one provider ladder, not per-role
 // ones), and the storage-backed idempotency/agent_turns stores.
-func wireAgent(ctx context.Context, cfg config.Config, sandboxClient *sandbox.Client, pub *events.Publisher, store *storage.Store, log *slog.Logger) (*agent.Executor, *agent.Planner, error) {
+func wireAgent(ctx context.Context, cfg config.Config, sandboxClient *sandbox.Client, pub *events.Publisher, store *storage.Store, artifacts *artifact.Store, log *slog.Logger) (*agent.Executor, *agent.Planner, error) {
 	registry, err := agent.NewRegistry(append(
 		agent.NewFSTools(sandboxClient),
 		agent.NewExecTool(sandboxClient),
@@ -192,7 +215,7 @@ func wireAgent(ctx context.Context, cfg config.Config, sandboxClient *sandbox.Cl
 		return nil, nil, fmt.Errorf("construct policy engine: %w", err)
 	}
 
-	exec, err := agent.New(agent.Config{
+	execCfg := agent.Config{
 		Registry:  registry,
 		Policy:    policy,
 		Router:    router,
@@ -202,7 +225,11 @@ func wireAgent(ctx context.Context, cfg config.Config, sandboxClient *sandbox.Cl
 		Turns:     store,
 		Pool:      store.Pool(),
 		Logger:    log,
-	})
+	}
+	if artifacts != nil { // see the same nil-interface note in wireControlPlane
+		execCfg.Artifacts = artifacts
+	}
+	exec, err := agent.New(execCfg)
 	if err != nil {
 		return nil, nil, fmt.Errorf("construct executor: %w", err)
 	}
@@ -217,6 +244,23 @@ func wireAgent(ctx context.Context, cfg config.Config, sandboxClient *sandbox.Cl
 		return nil, nil, fmt.Errorf("construct planner: %w", err)
 	}
 	return exec, planner, nil
+}
+
+// wireArtifacts constructs an artifact.Store if S3 is configured, or
+// returns (nil, nil) — artifact upload/download is optional, not
+// every deployment has object storage.
+func wireArtifacts(ctx context.Context, cfg config.Config) (*artifact.Store, error) {
+	if cfg.S3Endpoint == "" {
+		return nil, nil
+	}
+	store, err := artifact.New(ctx, artifact.Config{
+		Endpoint: cfg.S3Endpoint, Bucket: cfg.S3Bucket,
+		AccessKey: cfg.S3AccessKey, SecretKey: cfg.S3SecretKey, UseSSL: cfg.S3UseSSL,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("construct artifact store: %w", err)
+	}
+	return store, nil
 }
 
 // wireRouter builds an llm.Router with Anthropic primary / OpenAI

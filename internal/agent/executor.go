@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 
 	"github.com/google/uuid"
@@ -24,6 +25,15 @@ type sandboxManager interface {
 	sandboxClient
 	Create(ctx context.Context, jobID uuid.UUID) (string, error)
 	Destroy(ctx context.Context, sandboxID string) error
+	ExportWorkspace(ctx context.Context, sandboxID string) (io.ReadCloser, error)
+}
+
+// artifactUploader is the subset of *artifact.Store the executor
+// needs, declared at the consumer per CODE-STANDARDS §3.1. Optional:
+// a nil Config.Artifacts skips upload entirely, for tests and any
+// deployment that hasn't wired object storage.
+type artifactUploader interface {
+	Upload(ctx context.Context, jobID uuid.UUID, r io.Reader, size int64) (string, error)
 }
 
 // publisher is the subset of events.Publisher the executor needs.
@@ -62,6 +72,10 @@ type Config struct {
 	CancelWatcher  CancelWatcher   // nil defaults to a watcher backed by Pool
 	ContextBuilder *ContextBuilder // nil defaults to NewContextBuilder(defaultMaxContextTokens, nil)
 	Compactor      *Compactor      // nil defaults to NewCompactor(Router, 0)
+	// Artifacts uploads a job's workspace on every terminal path
+	// (ADR-012: failure preserves the artifact). nil skips upload —
+	// tests and any deployment without object storage configured.
+	Artifacts artifactUploader
 
 	MaxTurnsPerStep     int // default 12 (FR-021)
 	MaxObservationBytes int // default 8192 (FR-024)
@@ -123,6 +137,7 @@ type Executor struct {
 	cancel     CancelWatcher
 	context    *ContextBuilder
 	compact    *Compactor
+	artifacts  artifactUploader
 	maxTurns   int
 	maxObsLen  int
 	maxRepairs int
@@ -139,7 +154,8 @@ func New(cfg Config) (*Executor, error) {
 		registry: cfg.Registry, policy: cfg.Policy, router: cfg.Router,
 		sandbox: cfg.Sandbox, pub: cfg.Publisher, idem: cfg.IdemStore, turns: cfg.Turns,
 		pool: cfg.Pool, log: cfg.Logger, cancel: cfg.CancelWatcher, context: cfg.ContextBuilder, compact: cfg.Compactor,
-		maxTurns: cfg.MaxTurnsPerStep, maxObsLen: cfg.MaxObservationBytes, maxRepairs: cfg.MaxRepairsPerStep,
+		artifacts: cfg.Artifacts,
+		maxTurns:  cfg.MaxTurnsPerStep, maxObsLen: cfg.MaxObservationBytes, maxRepairs: cfg.MaxRepairsPerStep,
 	}, nil
 }
 
@@ -160,6 +176,7 @@ func (e *Executor) RunStep(ctx context.Context, job *queue.Job) error {
 	runErr := e.runAllSteps(ctx, job, sandboxID)
 
 	if errors.Is(runErr, ErrCancelled) {
+		e.uploadArtifact(context.WithoutCancel(ctx), job, sandboxID)
 		e.finishCancellation(ctx, job, sandboxID)
 		return nil
 	}
@@ -169,11 +186,39 @@ func (e *Executor) RunStep(ctx context.Context, job *queue.Job) error {
 	// and another worker will resume this same sandbox, so it must not
 	// be destroyed out from under that resumption.
 	if ctx.Err() == nil {
+		e.uploadArtifact(ctx, job, sandboxID)
 		if err := e.sandbox.Destroy(context.WithoutCancel(ctx), sandboxID); err != nil {
 			e.log.ErrorContext(ctx, "destroy sandbox failed", slog.String("sandbox_id", sandboxID), slog.Any("err", err))
 		}
 	}
 	return runErr
+}
+
+// uploadArtifact exports sandboxID's /workspace and uploads it before
+// the sandbox is destroyed, on every terminal path — SUCCEEDED,
+// FAILED, and CANCELLED alike (ADR-012: failure preserves the
+// artifact). Best-effort: an upload failure is logged, never returned
+// — a job's durable-execution outcome must not depend on object
+// storage being reachable (the same reasoning as I-8 for Redis).
+func (e *Executor) uploadArtifact(ctx context.Context, job *queue.Job, sandboxID string) {
+	if e.artifacts == nil {
+		return
+	}
+	tar, err := e.sandbox.ExportWorkspace(ctx, sandboxID)
+	if err != nil {
+		e.log.ErrorContext(ctx, "export workspace for artifact upload failed", slog.String("sandbox_id", sandboxID), slog.Any("err", err))
+		return
+	}
+	defer func() { _ = tar.Close() }()
+
+	key, err := e.artifacts.Upload(ctx, job.ID, tar, -1)
+	if err != nil {
+		e.log.ErrorContext(ctx, "upload artifact failed", slog.String("sandbox_id", sandboxID), slog.Any("err", err))
+		return
+	}
+	if err := queue.SetJobArtifactKey(ctx, e.pool, job.ID, key); err != nil {
+		e.log.ErrorContext(ctx, "persist artifact key failed", slog.Any("err", err))
+	}
 }
 
 // finishCancellation completes PRD §13.3 steps 3-4 for a cancellation

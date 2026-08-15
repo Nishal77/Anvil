@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strconv"
 
 	"github.com/google/uuid"
 
+	"github.com/anvil-dev/anvil/internal/artifact"
 	"github.com/anvil-dev/anvil/internal/queue"
 	"github.com/anvil-dev/anvil/internal/storage"
 )
@@ -16,6 +18,12 @@ import (
 // eventPublisher is the subset of events.Publisher the jobs handlers need.
 type eventPublisher interface {
 	Publish(ctx context.Context, jobID uuid.UUID, typ storage.EventType, payload json.RawMessage) error
+}
+
+// artifactDownloader is the subset of *artifact.Store the jobs
+// handlers need, declared at the consumer per CODE-STANDARDS §3.1.
+type artifactDownloader interface {
+	Download(ctx context.Context, jobID uuid.UUID) (io.ReadCloser, error)
 }
 
 const (
@@ -183,6 +191,44 @@ func (s *Server) handleCancelJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleDownloadArtifact — GET /v1/jobs/{id}/artifact. Streams the
+// job's uploaded workspace archive (a tar of /workspace as it stood
+// when the job reached a terminal state — SUCCEEDED, FAILED, or
+// CANCELLED all upload one, ADR-012). 503 if no artifact store is
+// configured; 404 if this job has none (still running, or the upload
+// itself failed — best-effort, PRD §13.3/§12.4).
+func (s *Server) handleDownloadArtifact(w http.ResponseWriter, r *http.Request) {
+	if s.artifacts == nil {
+		writeProblem(w, r, http.StatusServiceUnavailable, "https://anvil.dev/errors/not-configured", "Artifact storage not configured", "")
+		return
+	}
+	job, ok := s.loadOwnedJob(w, r)
+	if !ok {
+		return
+	}
+	if job.ArtifactKey == "" {
+		writeProblem(w, r, http.StatusNotFound, "https://anvil.dev/errors/not-found", "No artifact for this job", "")
+		return
+	}
+
+	content, err := s.artifacts.Download(r.Context(), job.ID)
+	if err != nil {
+		if errors.Is(err, artifact.ErrNotFound) {
+			writeProblem(w, r, http.StatusNotFound, "https://anvil.dev/errors/not-found", "No artifact for this job", "")
+			return
+		}
+		s.writeInternalError(w, r, err)
+		return
+	}
+	defer func() { _ = content.Close() }()
+
+	w.Header().Set("Content-Type", "application/gzip")
+	w.Header().Set("Content-Disposition", `attachment; filename="`+job.ID.String()+`.tar.gz"`)
+	if _, err := io.Copy(w, content); err != nil {
+		s.log.ErrorContext(r.Context(), "stream artifact download failed", "job_id", job.ID, "err", err)
+	}
 }
 
 // loadOwnedJob reads the job named by {id} and 404s if it doesn't

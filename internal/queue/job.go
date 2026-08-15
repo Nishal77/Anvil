@@ -59,6 +59,11 @@ type Job struct {
 	// CancelRequestedAt is non-nil once POST /cancel has been called
 	// (PRD §13.3 step 1). The executor polls this between every turn.
 	CancelRequestedAt *time.Time
+	// ArtifactKey is the workspace archive's object key in artifact
+	// storage, set once the upload completes on a terminal status
+	// (SUCCEEDED, FAILED, or CANCELLED — ADR-012: failure preserves
+	// the artifact). Empty until then.
+	ArtifactKey string
 }
 
 // JobStatusFields carries the optional column writes that accompany a
@@ -84,7 +89,8 @@ type JobStatusFields struct {
 const jobColumns = `id, user_id, prompt, status, COALESCE(failure_reason, ''),
 	attempt, max_attempts, COALESCE(lease_owner, ''), lease_expires_at,
 	run_after, created_at, started_at, finished_at, COALESCE(sandbox_id, ''),
-	COALESCE(plan_summary, ''), plan_risks, auto_approve, cancel_requested_at`
+	COALESCE(plan_summary, ''), plan_risks, auto_approve, cancel_requested_at,
+	COALESCE(artifact_key, '')`
 
 // scanJob reads one jobColumns-shaped row into a Job.
 func scanJob(row pgx.Row) (*Job, error) {
@@ -94,6 +100,7 @@ func scanJob(row pgx.Row) (*Job, error) {
 		&j.Attempt, &j.MaxAttempts, &j.LeaseOwner, &j.LeaseExpiresAt,
 		&j.RunAfter, &j.CreatedAt, &j.StartedAt, &j.FinishedAt, &j.SandboxID,
 		&j.PlanSummary, &j.PlanRisks, &j.AutoApprove, &j.CancelRequestedAt,
+		&j.ArtifactKey,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("queue: scan job: %w", err)
@@ -145,6 +152,18 @@ const setJobSandboxIDSQL = `UPDATE jobs SET sandbox_id = $2 WHERE id = $1`
 func SetJobSandboxID(ctx context.Context, pool *pgxpool.Pool, jobID uuid.UUID, sandboxID string) error {
 	if _, err := pool.Exec(ctx, setJobSandboxIDSQL, jobID, sandboxID); err != nil {
 		return fmt.Errorf("queue: set sandbox id for job %s: %w", jobID, err)
+	}
+	return nil
+}
+
+const setJobArtifactKeySQL = `UPDATE jobs SET artifact_key = $2 WHERE id = $1`
+
+// SetJobArtifactKey records jobID's uploaded workspace archive. Same
+// reasoning as SetJobSandboxID: a separate statement from Transition,
+// since this isn't a status change (I-1 doesn't apply).
+func SetJobArtifactKey(ctx context.Context, pool *pgxpool.Pool, jobID uuid.UUID, artifactKey string) error {
+	if _, err := pool.Exec(ctx, setJobArtifactKeySQL, jobID, artifactKey); err != nil {
+		return fmt.Errorf("queue: set artifact key for job %s: %w", jobID, err)
 	}
 	return nil
 }

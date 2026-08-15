@@ -138,9 +138,20 @@ func (b *ContextBuilder) assembleMessages(in BuildInput, included map[int]bool, 
 		if t.ToolName == "" {
 			continue
 		}
+		// The turn's own row ID is reused as the tool_use/tool_result
+		// pairing ID. agent_turns never persisted the model's original
+		// call ID (storage.AgentTurn has no field for it), so replaying
+		// history uses a synthetic ID instead — it only needs to be
+		// consistent within this reconstructed pair, not equal to
+		// whatever the model originally issued. Providers like
+		// Anthropic reject a tool_result whose tool_use_id doesn't
+		// match the preceding tool_use block's id (previously this
+		// left ToolCalls[0].ID empty while ToolCallID carried the tool
+		// NAME — always a mismatch, always a 400).
+		callID := t.ID.String()
 		messages = append(messages,
-			llm.Message{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{{Name: t.ToolName, Input: t.ToolArgs}}},
-			llm.Message{Role: llm.RoleTool, ToolCallID: t.ToolName, ToolResult: t.Observation},
+			llm.Message{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{{ID: callID, Name: t.ToolName, Input: t.ToolArgs}}},
+			llm.Message{Role: llm.RoleTool, ToolCallID: callID, ToolResult: t.Observation},
 		)
 	}
 	return messages
