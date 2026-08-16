@@ -63,7 +63,16 @@ func runInGroup(ctx context.Context, cli dockerExecClient, containerID, command 
 	// isJobControlNotice in stream.go), which doesn't change any
 	// behavior, just hides noise.
 	pidFile := "/tmp/.anvil-exec-" + uuid.NewString()
-	wrapped := fmt.Sprintf(`set -m; ( %s ) & PID=$!; echo $PID > %s; wait $PID`, command, pidFile)
+	// sentinel is how the reading side below learns "every byte the
+	// command wrote to stdout has actually arrived", which the exit
+	// code alone does not prove — see the long comment at attached.Close()
+	// for why that distinction is the whole point of this line.
+	sentinel := "ANVIL_EXEC_DONE_" + uuid.NewString()
+	// printf '\n%s\n' rather than echo: it guarantees the sentinel
+	// lands on its own line even if command's last write didn't end in
+	// a newline, so the scanner-side exact-match check below can never
+	// see it merged onto the tail of real output.
+	wrapped := fmt.Sprintf(`set -m; ( %s ) & PID=$!; echo $PID > %s; wait $PID; ANVIL_EXIT=$?; printf '\n%%s\n' %s; exit $ANVIL_EXIT`, command, pidFile, sentinel)
 
 	// We use a fresh background context here on purpose, not the ctx
 	// passed into this function. ctx belongs to the caller (the incoming
@@ -105,21 +114,46 @@ func runInGroup(ctx context.Context, cli dockerExecClient, containerID, command 
 		copyDone <- copyErr
 	}()
 
+	// drained closes the instant the sentinel line arrives on stdout —
+	// see waitForDrain below for why this exists at all.
+	drained := make(chan struct{})
+	stdoutOnChunk := func(stream string, data []byte) {
+		if string(data) == sentinel {
+			close(drained)
+			return // the sentinel is bookkeeping, never real command output
+		}
+		onChunk(stream, data)
+	}
+
 	scanErrs := make(chan error, 2)
 	var scanWG sync.WaitGroup
 	scanWG.Add(2)
-	go func() { defer scanWG.Done(); scanErrs <- scanLines(stdoutR, "stdout", onChunk) }()
+	go func() { defer scanWG.Done(); scanErrs <- scanLines(stdoutR, "stdout", stdoutOnChunk) }()
 	go func() { defer scanWG.Done(); scanErrs <- scanLines(stderrR, "stderr", onChunk) }()
 
 	result := waitForExecOrTimeout(ctx, cli, created.ID, containerID, pidFile, timeout, execGracePeriod)
 
-	// We close this only after we've separately confirmed (via the polling
-	// above) that the command has actually finished — not right when this
-	// function returns. Docker's output stream doesn't close itself just
-	// because the command exited, so waiting for the stream to close
-	// before closing it ourselves would deadlock: we found this the hard
-	// way when a test hung for the full shutdown timeout instead of
-	// returning quickly.
+	// We close this only after we've separately confirmed the command
+	// has actually finished — not right when this function returns.
+	// Docker's output stream doesn't close itself just because the
+	// command exited, so waiting for the stream to close before closing
+	// it ourselves would deadlock: we found this the hard way when a
+	// test hung for the full shutdown timeout instead of returning
+	// quickly. But "the process exited" (ExecInspect, a completely
+	// separate API call from the attach stream) and "every byte it
+	// wrote has actually arrived over the attach connection" are NOT
+	// the same moment — found live, via a real, reproducible truncated
+	// artifact export: closing the instant ExecInspect reports exit
+	// races the daemon's own in-flight flush of a large payload, and
+	// the race gets more likely to lose the tail of it as the payload
+	// gets bigger. waitForDrain closes this gap by waiting for the
+	// sentinel line the wrapped command prints as its very last stdout
+	// write (see wrapped above) — if that line has arrived, everything
+	// written before it on the same stream has too, by the ordering
+	// guarantee of a single stream. A killed/timed-out/cancelled
+	// process never reaches that line at all, so this only waits when
+	// there's something to wait for.
+	waitForDrain(result, drained)
 	attached.Close()
 
 	<-copyDone
@@ -142,6 +176,30 @@ func runInGroup(ctx context.Context, cli dockerExecClient, containerID, command 
 		return result.exitCode, fmt.Errorf("runner: exec cancelled: %w", ctx.Err())
 	}
 	return result.exitCode, nil
+}
+
+// drainGraceTimeout bounds how long waitForDrain waits for the
+// sentinel line before giving up and closing the connection anyway —
+// a safety net against a sentinel that's lost for some reason other
+// than the ones waitForDrain already excludes (a killed process),
+// so a bug in that reasoning degrades to the old truncation-prone
+// behavior instead of hanging forever.
+const drainGraceTimeout = 10 * time.Second
+
+// waitForDrain blocks until drained closes (the sentinel line
+// arrived, proving the command's real output is fully in hand) or
+// drainGraceTimeout elapses — except when result says the process was
+// killed (timed out or cancelled), in which case it was never going
+// to reach the sentinel line at all, and waiting would just delay
+// returning for no benefit.
+func waitForDrain(result execResult, drained <-chan struct{}) {
+	if result.timedOut || result.cancelled {
+		return
+	}
+	select {
+	case <-drained:
+	case <-time.After(drainGraceTimeout):
+	}
 }
 
 type execResult struct {

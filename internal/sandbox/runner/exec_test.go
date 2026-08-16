@@ -151,6 +151,61 @@ func TestWaitForExecOrTimeout_CallerCancelled(t *testing.T) {
 	}
 }
 
+// TestWaitForDrain_WaitsForSentinelOnNormalCompletion proves the fix
+// for the truncation bug found live: a normal (non-killed) completion
+// must wait for the drained signal before returning, not race ahead
+// of it.
+func TestWaitForDrain_WaitsForSentinelOnNormalCompletion(t *testing.T) {
+	t.Parallel()
+	drained := make(chan struct{})
+	returned := make(chan struct{})
+
+	go func() {
+		waitForDrain(execResult{}, drained)
+		close(returned)
+	}()
+
+	select {
+	case <-returned:
+		t.Fatal("waitForDrain returned before the sentinel arrived")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(drained)
+	select {
+	case <-returned:
+	case <-time.After(time.Second):
+		t.Fatal("waitForDrain did not return within 1s of the sentinel arriving")
+	}
+}
+
+// TestWaitForDrain_SkipsWaitForKilledProcess proves a timed-out or
+// cancelled process — which never reaches the sentinel line, since it
+// was killed before or during the wrapped script — doesn't make
+// waitForDrain block for the full grace timeout.
+func TestWaitForDrain_SkipsWaitForKilledProcess(t *testing.T) {
+	t.Parallel()
+	for name, result := range map[string]execResult{
+		"timed out": {timedOut: true},
+		"cancelled": {cancelled: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			never := make(chan struct{}) // never closes — proves waitForDrain didn't wait on it
+			done := make(chan struct{})
+			go func() {
+				waitForDrain(result, never)
+				close(done)
+			}()
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+				t.Fatal("waitForDrain blocked on a killed process's drain signal")
+			}
+		})
+	}
+}
+
 // TestPollUntilExited_NotFoundIsTerminal — an exec that has been
 // garbage-collected (e.g. its container was destroyed mid-poll) must not
 // be retried forever; that would hang the caller indefinitely instead of
