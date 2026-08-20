@@ -45,7 +45,7 @@ func (e *Executor) runOneTurn(ctx context.Context, job *queue.Job, steps []queue
 		return turnOutcome{retryHint: "You must call exactly one tool. Call step_done if the step is already complete."}, nil
 	}
 
-	decision, reason := e.policy.Evaluate(ctx, job.ID, ToolCall{Name: call.Name, Args: call.Input, SandboxID: sandboxID})
+	decision, reason := e.policy.Evaluate(ctx, job.ID, ToolCall{Name: call.Name, Args: call.Input, SandboxID: sandboxID, CreateRepo: job.CreateRepo})
 	policyDecisionsTotal.WithLabelValues(call.Name, decision.String()).Inc()
 	costUSDMicros := llm.CostUSDMicros(resp.Model, resp.Usage)
 
@@ -66,7 +66,7 @@ func (e *Executor) runOneTurn(ctx context.Context, job *queue.Job, steps []queue
 		return turnOutcome{}, fmt.Errorf("agent: executor turn: persist turn: %w", insertErr)
 	}
 
-	return e.resolveTurnOutcome(ctx, step, sandboxID, turnID, call, decision, reason, resp.Usage, costUSDMicros, latencyMS)
+	return e.resolveTurnOutcome(ctx, job.UserID, step, sandboxID, turnID, call, decision, reason, resp.Usage, costUSDMicros, latencyMS)
 }
 
 // resolveTurnOutcome dispatches call, persists its result, and decides
@@ -74,8 +74,8 @@ func (e *Executor) runOneTurn(ctx context.Context, job *queue.Job, steps []queue
 // failure starts a repair, anything else just continues. Split out of
 // runOneTurn to keep that function's branching within CLAUDE.md's
 // cyclomatic-complexity limit.
-func (e *Executor) resolveTurnOutcome(ctx context.Context, step queue.Step, sandboxID string, turnID uuid.UUID, call llm.ToolCall, decision PolicyDecision, reason string, usage llm.Usage, costUSDMicros int64, latencyMS int) (turnOutcome, error) {
-	observation, execErr := e.dispatch(ctx, decision, reason, step.JobID, step.ID, sandboxID, call)
+func (e *Executor) resolveTurnOutcome(ctx context.Context, userID uuid.UUID, step queue.Step, sandboxID string, turnID uuid.UUID, call llm.ToolCall, decision PolicyDecision, reason string, usage llm.Usage, costUSDMicros int64, latencyMS int) (turnOutcome, error) {
+	observation, execErr := e.dispatch(ctx, decision, reason, step.JobID, userID, step.ID, sandboxID, call)
 	truncated := truncateObservation(observation, e.maxObsLen)
 
 	execErrStr := ""
@@ -189,7 +189,7 @@ func reverseTurns(turns []storage.AgentTurn) []storage.AgentTurn {
 // callIdempotent, so a step re-run after a crash reuses the prior
 // attempt's result for any call it already made instead of repeating
 // a side effect.
-func (e *Executor) dispatch(ctx context.Context, decision PolicyDecision, reason string, jobID, stepID uuid.UUID, sandboxID string, call llm.ToolCall) (string, error) {
+func (e *Executor) dispatch(ctx context.Context, decision PolicyDecision, reason string, jobID, userID, stepID uuid.UUID, sandboxID string, call llm.ToolCall) (string, error) {
 	if decision != Allow {
 		return fmt.Sprintf("denied: %s", reason), nil
 	}
@@ -200,7 +200,7 @@ func (e *Executor) dispatch(ctx context.Context, decision PolicyDecision, reason
 	}
 
 	result, err := callIdempotent(ctx, e.idem, jobID, stepID, call.Name, call.Input, func() (json.RawMessage, error) {
-		obs, handlerErr := tool.Handler(ctx, sandboxID, call.Input)
+		obs, handlerErr := tool.Handler(ctx, sandboxID, userID, call.Input)
 		if handlerErr != nil {
 			return nil, handlerErr
 		}

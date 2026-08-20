@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -41,6 +42,17 @@ type publisher interface {
 	Publish(ctx context.Context, jobID uuid.UUID, typ storage.EventType, payload json.RawMessage) error
 }
 
+// deployer is the subset of *deploy.DockerDeployer the executor
+// needs, declared at the consumer (CODE-STANDARDS §3.1). agent's
+// declared dependency graph (CLAUDE.md PK5) is llm, sandbox, storage,
+// events — it does not include deploy, so *deploy.DockerDeployer is
+// wired in structurally, satisfying this interface without agent
+// importing the deploy package at all. Wiring happens in
+// cmd/anvil/main.go, which is free to import both.
+type deployer interface {
+	Deploy(ctx context.Context, jobID uuid.UUID, archive []byte) (previewURL string, err error)
+}
+
 // TurnStore persists the agent_turns audit trail (migration 004) and
 // serves it back — ListAgentTurns is what ContextBuilder's tier 4/5
 // read on every turn, rather than an in-memory conversation history
@@ -76,6 +88,12 @@ type Config struct {
 	// (ADR-012: failure preserves the artifact). nil skips upload —
 	// tests and any deployment without object storage configured.
 	Artifacts artifactUploader
+	// Deployer builds and runs a preview deployment for a job whose
+	// options.deploy was set (PRD §11.3, §13.1's DEPLOYING state).
+	// nil skips deploy entirely, even for a job that requested it —
+	// tests and any deployment without Docker/Caddy configured for
+	// previews.
+	Deployer deployer
 
 	MaxTurnsPerStep     int // default 12 (FR-021)
 	MaxObservationBytes int // default 8192 (FR-024)
@@ -138,6 +156,7 @@ type Executor struct {
 	context    *ContextBuilder
 	compact    *Compactor
 	artifacts  artifactUploader
+	deployer   deployer
 	maxTurns   int
 	maxObsLen  int
 	maxRepairs int
@@ -154,8 +173,8 @@ func New(cfg Config) (*Executor, error) {
 		registry: cfg.Registry, policy: cfg.Policy, router: cfg.Router,
 		sandbox: cfg.Sandbox, pub: cfg.Publisher, idem: cfg.IdemStore, turns: cfg.Turns,
 		pool: cfg.Pool, log: cfg.Logger, cancel: cfg.CancelWatcher, context: cfg.ContextBuilder, compact: cfg.Compactor,
-		artifacts: cfg.Artifacts,
-		maxTurns:  cfg.MaxTurnsPerStep, maxObsLen: cfg.MaxObservationBytes, maxRepairs: cfg.MaxRepairsPerStep,
+		artifacts: cfg.Artifacts, deployer: cfg.Deployer,
+		maxTurns: cfg.MaxTurnsPerStep, maxObsLen: cfg.MaxObservationBytes, maxRepairs: cfg.MaxRepairsPerStep,
 	}, nil
 }
 
@@ -186,7 +205,17 @@ func (e *Executor) RunStep(ctx context.Context, job *queue.Job) error {
 	// and another worker will resume this same sandbox, so it must not
 	// be destroyed out from under that resumption.
 	if ctx.Err() == nil {
-		e.uploadArtifact(ctx, job, sandboxID)
+		archive := e.uploadArtifact(ctx, job, sandboxID)
+		if runErr == nil && job.Deploy && e.deployer != nil {
+			// deployPreview performs its own RUNNING -> DEPLOYING ->
+			// {SUCCEEDED, FAILED} transition (PRD §13.1) and returns
+			// the outcome as runErr, exactly like finishCancellation's
+			// self-transition above: dispatcher.go's runJob only
+			// auto-transitions a job still sitting in the status it
+			// was claimed into, so a job this branch has already
+			// moved out of RUNNING is left alone.
+			runErr = e.deployPreview(ctx, job, archive)
+		}
 		if err := e.sandbox.Destroy(context.WithoutCancel(ctx), sandboxID); err != nil {
 			e.log.ErrorContext(ctx, "destroy sandbox failed", slog.String("sandbox_id", sandboxID), slog.Any("err", err))
 		}
@@ -200,25 +229,85 @@ func (e *Executor) RunStep(ctx context.Context, job *queue.Job) error {
 // artifact). Best-effort: an upload failure is logged, never returned
 // — a job's durable-execution outcome must not depend on object
 // storage being reachable (the same reasoning as I-8 for Redis).
-func (e *Executor) uploadArtifact(ctx context.Context, job *queue.Job, sandboxID string) {
+// Returns the exported archive's bytes on success, or nil — the same
+// bytes deployPreview needs, so a job with options.deploy set doesn't
+// pay for a second ExportWorkspace round-trip to the Runner.
+func (e *Executor) uploadArtifact(ctx context.Context, job *queue.Job, sandboxID string) []byte {
 	if e.artifacts == nil {
-		return
+		return nil
 	}
 	tar, err := e.sandbox.ExportWorkspace(ctx, sandboxID)
 	if err != nil {
 		e.log.ErrorContext(ctx, "export workspace for artifact upload failed", slog.String("sandbox_id", sandboxID), slog.Any("err", err))
-		return
+		return nil
 	}
 	defer func() { _ = tar.Close() }()
 
-	key, err := e.artifacts.Upload(ctx, job.ID, tar, -1)
+	archive, err := io.ReadAll(tar)
+	if err != nil {
+		e.log.ErrorContext(ctx, "read exported workspace failed", slog.String("sandbox_id", sandboxID), slog.Any("err", err))
+		return nil
+	}
+
+	key, err := e.artifacts.Upload(ctx, job.ID, bytes.NewReader(archive), int64(len(archive)))
 	if err != nil {
 		e.log.ErrorContext(ctx, "upload artifact failed", slog.String("sandbox_id", sandboxID), slog.Any("err", err))
-		return
+		return archive
 	}
 	if err := queue.SetJobArtifactKey(ctx, e.pool, job.ID, key); err != nil {
 		e.log.ErrorContext(ctx, "persist artifact key failed", slog.Any("err", err))
 	}
+	return archive
+}
+
+// deployPreview builds job's already-uploaded archive into a preview
+// deployment (PRD §13.1's DEPLOYING state), transitioning RUNNING ->
+// DEPLOYING before starting and DEPLOYING -> SUCCEEDED or, on a deploy
+// error, DEPLOYING -> FAILED (the "deploy error" edge in PRD §13.1's
+// diagram) — a job that opted into a preview and didn't get one is a
+// failed job, not a silently degraded success. Returns nil in both
+// outcomes: the terminal transition has already been written, so
+// RunStep must not also return an error dispatcher.go would try to
+// transition again.
+func (e *Executor) deployPreview(ctx context.Context, job *queue.Job, archive []byte) error {
+	if archive == nil {
+		return e.failDeploy(ctx, job, queue.StatusRunning, errors.New("no artifact was uploaded to deploy"))
+	}
+	if err := queue.Transition(ctx, e.pool, job.ID, queue.StatusRunning, queue.StatusDeploying, queue.JobStatusFields{}); err != nil {
+		e.log.ErrorContext(ctx, "transition to DEPLOYING failed", slog.Any("err", err))
+		return fmt.Errorf("agent: transition to deploying: %w", err)
+	}
+	e.publish(ctx, job.ID, "job_deploying", map[string]any{})
+
+	previewURL, err := e.deployer.Deploy(ctx, job.ID, archive)
+	if err != nil {
+		return e.failDeploy(ctx, job, queue.StatusDeploying, err)
+	}
+	if err := queue.SetJobPreviewURL(ctx, e.pool, job.ID, previewURL); err != nil {
+		e.log.ErrorContext(ctx, "persist preview url failed", slog.Any("err", err))
+	}
+	if err := queue.Transition(ctx, e.pool, job.ID, queue.StatusDeploying, queue.StatusSucceeded, queue.JobStatusFields{}); err != nil {
+		e.log.ErrorContext(ctx, "transition to SUCCEEDED failed", slog.Any("err", err))
+		return fmt.Errorf("agent: transition to succeeded: %w", err)
+	}
+	e.publish(ctx, job.ID, "job_succeeded", map[string]any{"preview_url": previewURL})
+	return nil
+}
+
+// failDeploy transitions job from its current status (RUNNING if no
+// archive was ever available, DEPLOYING if Deploy itself failed — the
+// caller always knows exactly which, since it made the transition
+// into DEPLOYING itself, if any) to FAILED with deployErr's message
+// as the failure reason.
+func (e *Executor) failDeploy(ctx context.Context, job *queue.Job, from queue.Status, deployErr error) error {
+	e.log.ErrorContext(ctx, "deploy preview failed", slog.Any("err", deployErr))
+	reason := fmt.Sprintf("deploy preview: %s", deployErr.Error())
+	if err := queue.Transition(ctx, e.pool, job.ID, from, queue.StatusFailed, queue.JobStatusFields{FailureReason: &reason}); err != nil {
+		e.log.ErrorContext(ctx, "transition to FAILED failed", slog.Any("err", err))
+		return fmt.Errorf("agent: transition to failed: %w", err)
+	}
+	e.publish(ctx, job.ID, "job_failed", map[string]any{"reason": reason})
+	return nil
 }
 
 // finishCancellation completes PRD §13.3 steps 3-4 for a cancellation

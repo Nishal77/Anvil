@@ -88,6 +88,8 @@ func newTestPostgres(t *testing.T) (*pgxpool.Pool, *storage.Store) {
 		"../../migrations/005_events.up.sql",
 		"../../migrations/006_idempotency.up.sql",
 		"../../migrations/008_planning.up.sql",
+		"../../migrations/010_create_repo.up.sql",
+		"../../migrations/011_deploy.up.sql",
 	} {
 		sql, err := os.ReadFile(path)
 		if err != nil {

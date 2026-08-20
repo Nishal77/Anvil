@@ -17,24 +17,100 @@ export function setToken(token: string): void {
   window.localStorage.setItem(TOKEN_KEY, token);
 }
 
-export interface CreateJobResponse {
+// Job mirrors internal/api/jobs.go's jobResponse — every field the
+// backend actually serializes, kept in sync by hand since there's no
+// generated client yet (api/openapi.yaml exists but nothing consumes
+// it on this side).
+export interface Job {
   id: string;
   status: string;
   prompt: string;
-  events_url: string;
+  events_url?: string;
+  failure_reason?: string;
+  plan_summary?: string;
+  preview_url?: string;
+  has_artifact: boolean;
+  token_budget: number;
+  tokens_used: number;
+  cost_usd_micros: number;
 }
 
-export async function createJob(prompt: string): Promise<CreateJobResponse> {
-  const res = await fetch(`${API_BASE}/v1/jobs`, {
-    method: "POST",
+class APIError extends Error {
+  constructor(
+    public status: number,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
+async function request<T>(
+  path: string,
+  init?: RequestInit,
+): Promise<T> {
+  const res = await fetch(`${API_BASE}${path}`, {
+    ...init,
     headers: {
-      "Content-Type": "application/json",
+      ...(init?.body ? { "Content-Type": "application/json" } : {}),
       Authorization: `Bearer ${getToken()}`,
+      ...init?.headers,
     },
-    body: JSON.stringify({ prompt }),
   });
   if (!res.ok) {
-    throw new Error(`create job failed: ${res.status} ${await res.text()}`);
+    throw new APIError(res.status, `${path} failed: ${res.status} ${await res.text()}`);
   }
+  if (res.status === 204) return undefined as T;
   return res.json();
+}
+
+export async function createJob(
+  prompt: string,
+  options?: { autoApprove?: boolean; createRepo?: boolean; deploy?: boolean },
+): Promise<Job> {
+  return request<Job>("/v1/jobs", {
+    method: "POST",
+    body: JSON.stringify({
+      prompt,
+      options: {
+        auto_approve: options?.autoApprove ?? false,
+        create_repo: options?.createRepo ?? false,
+        deploy: options?.deploy ?? false,
+      },
+    }),
+  });
+}
+
+export async function listJobs(): Promise<Job[]> {
+  return request<Job[]>("/v1/jobs");
+}
+
+export async function getJob(id: string): Promise<Job> {
+  return request<Job>(`/v1/jobs/${id}`);
+}
+
+export async function approveJob(id: string): Promise<void> {
+  await request<void>(`/v1/jobs/${id}/approve`, { method: "POST" });
+}
+
+export async function retryJob(id: string): Promise<void> {
+  await request<void>(`/v1/jobs/${id}/retry`, { method: "POST" });
+}
+
+export async function cancelJob(id: string): Promise<void> {
+  await request<void>(`/v1/jobs/${id}/cancel`, { method: "POST" });
+}
+
+// artifactURL is a plain link, not a fetch call: GET .../artifact
+// itself 302s to a presigned object-storage URL (PRD §11.2), so the
+// browser follows it directly — no JS needed beyond setting href.
+// Authorization travels as ?access_token= because a plain <a> can't
+// set a header, the same accommodation the SSE log view needs.
+export function artifactURL(id: string): string {
+  return `${API_BASE}/v1/jobs/${id}/artifact?access_token=${encodeURIComponent(getToken())}`;
+}
+
+// usdFromMicros converts CostUSDMicros (USD millionths) to a display
+// string, e.g. 61700 -> "$0.0617".
+export function usdFromMicros(micros: number): string {
+  return `$${(micros / 1_000_000).toFixed(4)}`;
 }

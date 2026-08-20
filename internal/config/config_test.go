@@ -10,6 +10,7 @@ func setRequiredEnv(t *testing.T) {
 	t.Setenv("DATABASE_URL", "postgres://localhost/anvil")
 	t.Setenv("REDIS_URL", "redis://localhost:6379")
 	t.Setenv("ANVIL_JWT_SECRET", "01234567890123456789012345678901")
+	t.Setenv("ANVIL_SECRET_ENCRYPTION_KEY", "01234567890123456789012345678901")
 	t.Setenv("ANVIL_ANTHROPIC_API_KEY", "test-key-not-real")
 }
 
@@ -81,6 +82,16 @@ func TestConfig_Load_ShortJWTSecretFails(t *testing.T) {
 	}
 }
 
+func TestConfig_Load_WrongSizeSecretEncryptionKeyFails(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("ANVIL_SECRET_ENCRYPTION_KEY", "too-short")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("Load() succeeded, want error for a non-32-byte ANVIL_SECRET_ENCRYPTION_KEY")
+	}
+}
+
 func TestConfig_Load_AppliesDefaults(t *testing.T) {
 	setRequiredEnv(t)
 
@@ -109,6 +120,22 @@ func TestConfig_LogValue_RedactsJWTSigningKey(t *testing.T) {
 	rendered := cfg.LogValue().String()
 	if strings.Contains(rendered, string(cfg.JWTSigningKey)) {
 		t.Fatal("LogValue() leaked the raw JWT signing key")
+	}
+}
+
+func TestConfig_LogValue_RedactsSecretEncryptionKey(t *testing.T) {
+	setRequiredEnv(t)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+
+	rendered := cfg.LogValue().String()
+	if !strings.Contains(rendered, "[redacted]") {
+		t.Fatal("LogValue() did not redact the secret encryption key")
+	}
+	if strings.Contains(rendered, string(cfg.SecretEncryptionKey)) {
+		t.Fatal("LogValue() leaked the raw secret encryption key")
 	}
 }
 

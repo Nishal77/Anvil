@@ -24,6 +24,11 @@ type authService interface {
 	Refresh(ctx context.Context, refreshToken string) (auth.TokenPair, error)
 	Logout(ctx context.Context, callerID uuid.UUID, refreshToken string) error
 	VerifyAccessToken(token string) (uuid.UUID, error)
+	PutSecret(ctx context.Context, userID uuid.UUID, name, plaintext string) error
+	ListSecretNames(ctx context.Context, userID uuid.UUID) ([]string, error)
+	DeleteSecret(ctx context.Context, userID uuid.UUID, name string) error
+	BeginGitHubOAuth(userID uuid.UUID) (string, error)
+	CompleteGitHubOAuth(ctx context.Context, code, state string) (string, error)
 }
 
 // Config configures a Server.
@@ -107,13 +112,19 @@ func New(cfg Config) (*Server, error) {
 	mux.HandleFunc("POST /auth/login", s.handleLogin)
 	mux.HandleFunc("POST /auth/refresh", s.handleAuthRefresh)
 	mux.Handle("POST /auth/logout", requireAuth(cfg.Auth)(http.HandlerFunc(s.handleLogout)))
+	mux.Handle("POST /secrets", requireAuth(cfg.Auth)(http.HandlerFunc(s.handlePutSecret)))
+	mux.Handle("GET /secrets", requireAuth(cfg.Auth)(http.HandlerFunc(s.handleListSecretNames)))
+	mux.Handle("DELETE /secrets/{name}", requireAuth(cfg.Auth)(http.HandlerFunc(s.handleDeleteSecret)))
+	mux.HandleFunc("GET /auth/github", s.handleBeginGitHubOAuth)
+	mux.HandleFunc("GET /auth/github/callback", s.handleGitHubCallback)
 	mux.Handle("POST /v1/jobs", requireAuth(cfg.Auth)(http.HandlerFunc(s.handleCreateJob)))
 	mux.Handle("GET /v1/jobs", requireAuth(cfg.Auth)(http.HandlerFunc(s.handleListJobs)))
 	mux.Handle("GET /v1/jobs/{id}", requireAuth(cfg.Auth)(http.HandlerFunc(s.handleGetJob)))
 	mux.Handle("POST /v1/jobs/{id}/approve", requireAuth(cfg.Auth)(http.HandlerFunc(s.handleApproveJob)))
 	mux.Handle("POST /v1/jobs/{id}/cancel", requireAuth(cfg.Auth)(http.HandlerFunc(s.handleCancelJob)))
-	mux.Handle("GET /v1/jobs/{id}/events", requireAuthSSE(cfg.Auth)(http.HandlerFunc(s.handleJobEvents)))
-	mux.Handle("GET /v1/jobs/{id}/artifact", requireAuth(cfg.Auth)(http.HandlerFunc(s.handleDownloadArtifact)))
+	mux.Handle("POST /v1/jobs/{id}/retry", requireAuth(cfg.Auth)(http.HandlerFunc(s.handleRetryJob)))
+	mux.Handle("GET /v1/jobs/{id}/events", requireAuthQueryToken(cfg.Auth)(http.HandlerFunc(s.handleJobEvents)))
+	mux.Handle("GET /v1/jobs/{id}/artifact", requireAuthQueryToken(cfg.Auth)(http.HandlerFunc(s.handleDownloadArtifact)))
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /readyz", s.handleReadyz)
 	mux.Handle("GET /metrics", promhttp.Handler())

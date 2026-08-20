@@ -9,17 +9,19 @@ import (
 )
 
 const (
-	defaultHTTPAddr         = ":8080"
-	defaultDatabaseMaxConns = 10
-	defaultAccessTokenTTL   = 15 * time.Minute
-	defaultRefreshTokenTTL  = 7 * 24 * time.Hour
-	defaultRunnerAddr       = "http://127.0.0.1:9090"
-	minJWTSigningKeyBytes   = 32
-	defaultGeminiModel      = "gemini-2.5-flash"
-	defaultOpenAIModel      = "gpt-4o-mini"
-	defaultMonthlyUSDCap    = 10
-	usdMicrosPerUSD         = 1_000_000
-	defaultMaxSteps         = 12
+	defaultHTTPAddr          = ":8080"
+	defaultDatabaseMaxConns  = 10
+	defaultAccessTokenTTL    = 15 * time.Minute
+	defaultRefreshTokenTTL   = 7 * 24 * time.Hour
+	defaultRunnerAddr        = "http://127.0.0.1:9090"
+	minJWTSigningKeyBytes    = 32
+	secretEncryptionKeyBytes = 32
+	defaultGeminiModel       = "gemini-2.5-flash"
+	defaultOpenAIModel       = "gpt-4o-mini"
+	defaultMonthlyUSDCap     = 10
+	usdMicrosPerUSD          = 1_000_000
+	defaultMaxSteps          = 12
+	defaultCaddyAdminAddr    = "http://127.0.0.1:2019"
 )
 
 // Config holds process-wide configuration loaded from the environment.
@@ -33,6 +35,17 @@ type Config struct {
 	JWTSigningKey    []byte
 	AccessTokenTTL   time.Duration
 	RefreshTokenTTL  time.Duration
+	// SecretEncryptionKey seals user secrets (PRD §16.5) — AES-256-GCM,
+	// exactly 32 bytes.
+	SecretEncryptionKey []byte
+	// GitHub OAuth app (FR-001). All optional together: unset means
+	// GitHub linking is unavailable rather than a startup failure — see
+	// auth.Config's own validation for the "all or nothing" rule across
+	// these three.
+	GitHubClientID     string
+	GitHubClientSecret string
+	GitHubRedirectURL  string
+	GitHubWebURL       string
 	// GeminiAPIKey is optional — Gemini is not required when Anthropic
 	// and/or OpenAI keys are set (see validate).
 	GeminiAPIKey    string
@@ -55,6 +68,14 @@ type Config struct {
 	S3AccessKey string
 	S3SecretKey string
 	S3UseSSL    bool
+	// Preview deployments (PRD §9.7, FR-060..FR-063). PreviewDomain
+	// unset means deploy is unavailable rather than a startup failure,
+	// the same pattern as S3Endpoint above — a job that requests
+	// options.deploy on a deployment with no preview domain configured
+	// fails that job at deploy time (agent.Executor's deployPreview),
+	// not the whole control plane at startup.
+	PreviewDomain  string
+	CaddyAdminAddr string
 }
 
 // LogValue redacts JWTSigningKey and every API key so a careless
@@ -67,6 +88,7 @@ func (c Config) LogValue() slog.Value {
 		slog.String("redis_addr", c.RedisAddr),
 		slog.String("runner_addr", c.RunnerAddr),
 		slog.String("jwt_signing_key", "[redacted]"),
+		slog.String("secret_encryption_key", "[redacted]"),
 		slog.Duration("access_token_ttl", c.AccessTokenTTL),
 		slog.Duration("refresh_token_ttl", c.RefreshTokenTTL),
 		slog.Bool("gemini_configured", c.GeminiAPIKey != ""),
@@ -78,6 +100,8 @@ func (c Config) LogValue() slog.Value {
 		slog.Int("max_steps", c.MaxSteps),
 		slog.Bool("s3_configured", c.S3Endpoint != ""),
 		slog.String("s3_bucket", c.S3Bucket),
+		slog.Bool("preview_deploy_configured", c.PreviewDomain != ""),
+		slog.String("preview_domain", c.PreviewDomain),
 	)
 }
 
@@ -93,6 +117,11 @@ func Load() (Config, error) {
 		JWTSigningKey:       []byte(os.Getenv("ANVIL_JWT_SECRET")),
 		AccessTokenTTL:      defaultAccessTokenTTL,
 		RefreshTokenTTL:     defaultRefreshTokenTTL,
+		SecretEncryptionKey: []byte(os.Getenv("ANVIL_SECRET_ENCRYPTION_KEY")),
+		GitHubClientID:      os.Getenv("ANVIL_GITHUB_CLIENT_ID"),
+		GitHubClientSecret:  os.Getenv("ANVIL_GITHUB_CLIENT_SECRET"),
+		GitHubRedirectURL:   os.Getenv("ANVIL_GITHUB_REDIRECT_URL"),
+		GitHubWebURL:        os.Getenv("ANVIL_WEB_URL"),
 		GeminiAPIKey:        os.Getenv("ANVIL_GEMINI_API_KEY"),
 		GeminiModel:         envOr("ANVIL_GEMINI_MODEL", defaultGeminiModel),
 		AnthropicAPIKey:     os.Getenv("ANVIL_ANTHROPIC_API_KEY"),
@@ -105,6 +134,8 @@ func Load() (Config, error) {
 		S3AccessKey:         os.Getenv("ANVIL_S3_ACCESS_KEY"),
 		S3SecretKey:         os.Getenv("ANVIL_S3_SECRET_KEY"),
 		S3UseSSL:            os.Getenv("ANVIL_S3_USE_SSL") == "true",
+		PreviewDomain:       os.Getenv("ANVIL_PREVIEW_DOMAIN"),
+		CaddyAdminAddr:      envOr("ANVIL_CADDY_ADMIN_ADDR", defaultCaddyAdminAddr),
 	}
 
 	if v := os.Getenv("ANVIL_MAX_STEPS"); v != "" {
@@ -146,6 +177,9 @@ func (c Config) validate() error {
 	}
 	if len(c.JWTSigningKey) < minJWTSigningKeyBytes {
 		return fmt.Errorf("config: ANVIL_JWT_SECRET must be at least %d bytes, got %d", minJWTSigningKeyBytes, len(c.JWTSigningKey))
+	}
+	if len(c.SecretEncryptionKey) != secretEncryptionKeyBytes {
+		return fmt.Errorf("config: ANVIL_SECRET_ENCRYPTION_KEY must be exactly %d bytes, got %d", secretEncryptionKeyBytes, len(c.SecretEncryptionKey))
 	}
 	if c.DatabaseMaxConns <= 0 {
 		return fmt.Errorf("config: DATABASE_MAX_CONNS must be positive, got %d", c.DatabaseMaxConns)

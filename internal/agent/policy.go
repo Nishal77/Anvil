@@ -37,11 +37,15 @@ func (d PolicyDecision) String() string {
 // ToolCall is one model-issued invocation to evaluate and, if
 // allowed, dispatch. SandboxID is required for the fs_* path-escape
 // check (rule 3), which must resolve symlinks inside the sandbox's
-// own filesystem, not the control plane's.
+// own filesystem, not the control plane's. CreateRepo is the calling
+// job's own options.create_repo (PRD §11), needed by rule 5 — passed
+// in per call rather than looked up by jobID so PolicyEngine needs no
+// store dependency of its own.
 type ToolCall struct {
-	Name      string
-	Args      json.RawMessage
-	SandboxID string
+	Name       string
+	Args       json.RawMessage
+	SandboxID  string
+	CreateRepo bool
 }
 
 // Policy is declared at the consumer (CODE-STANDARDS §3.1) — Executor
@@ -58,12 +62,6 @@ type PolicyEngineConfig struct {
 	Registry *Registry
 	Sandbox  sandboxClient
 	Budget   llm.BudgetStore
-	// CreateRepo mirrors job.options.create_repo (PRD §16.3 rule 5).
-	// No PRIVILEGED tool is registered this week (git_push and
-	// github_open_pr land in Week 8), so this is unreachable in
-	// practice today — kept so the rule set is complete now rather
-	// than patched in later.
-	CreateRepo bool
 }
 
 func (c PolicyEngineConfig) validate() error {
@@ -117,7 +115,7 @@ func (p *PolicyEngine) Evaluate(ctx context.Context, jobID uuid.UUID, call ToolC
 		}
 	}
 
-	if reason := p.evaluatePrivileged(tool); reason != "" { // rule 5
+	if reason := p.evaluatePrivileged(tool, call.CreateRepo); reason != "" { // rule 5
 		return Deny, reason
 	}
 
@@ -128,8 +126,8 @@ func (p *PolicyEngine) Evaluate(ctx context.Context, jobID uuid.UUID, call ToolC
 	return Allow, "" // rule 7
 }
 
-func (p *PolicyEngine) evaluatePrivileged(tool Tool) string {
-	if tool.PolicyClass == PolicyPrivileged && !p.cfg.CreateRepo {
+func (p *PolicyEngine) evaluatePrivileged(tool Tool, createRepo bool) string {
+	if tool.PolicyClass == PolicyPrivileged && !createRepo {
 		return fmt.Sprintf("tool %q is privileged and this job did not set create_repo", tool.Name)
 	}
 	return ""

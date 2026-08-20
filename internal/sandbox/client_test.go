@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -142,6 +143,111 @@ func TestClient_Exec_NotFoundReturnsErrSandboxNotFound(t *testing.T) {
 // reassembles a base64 payload the Runner streamed across multiple
 // stdout chunks (exactly what a real multi-line `base64` command
 // output looks like) into the original bytes.
+func TestClient_WriteFile_Succeeds(t *testing.T) {
+	var gotPath string
+	var gotData []byte
+	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		var req WriteRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		gotPath = req.Path
+		gotData = req.Data
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	if err := c.WriteFile(context.Background(), "sb-1", "/tmp/cred-pipe", []byte("secret-value")); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if gotPath != "/tmp/cred-pipe" {
+		t.Errorf("Path = %q, want %q", gotPath, "/tmp/cred-pipe")
+	}
+	if string(gotData) != "secret-value" {
+		t.Errorf("Data = %q, want %q", gotData, "secret-value")
+	}
+}
+
+func TestClient_WriteFile_NotFoundReturnsErrSandboxNotFound(t *testing.T) {
+	c := testClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+
+	err := c.WriteFile(context.Background(), "gone", "/tmp/x", []byte("v"))
+	if !errors.Is(err, ErrSandboxNotFound) {
+		t.Errorf("WriteFile() error = %v, want ErrSandboxNotFound", err)
+	}
+}
+
+func TestClient_WriteFile_NonNoContentStatusIsError(t *testing.T) {
+	c := testClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+
+	if err := c.WriteFile(context.Background(), "sb-1", "/tmp/x", []byte("v")); err == nil {
+		t.Fatal("WriteFile() error = nil, want an error on a non-204 response")
+	}
+}
+
+func TestClient_BuildPreview_ReturnsContainerIDAndHostPort(t *testing.T) {
+	jobID := uuid.New()
+	var gotPath string
+	var gotBody []byte
+	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(BuildPreviewResponse{ContainerID: "c1", HostPort: 54321})
+	})
+
+	got, err := c.BuildPreview(context.Background(), jobID, bytes.NewReader([]byte("fake build context")))
+	if err != nil {
+		t.Fatalf("BuildPreview: %v", err)
+	}
+	if got.ContainerID != "c1" || got.HostPort != 54321 {
+		t.Errorf("BuildPreview() = %+v, want {c1 54321}", got)
+	}
+	if gotPath != "/previews/"+jobID.String() {
+		t.Errorf("request path = %q, want /previews/%s", gotPath, jobID)
+	}
+	if string(gotBody) != "fake build context" {
+		t.Errorf("request body = %q, want the build context bytes forwarded verbatim", gotBody)
+	}
+}
+
+func TestClient_BuildPreview_NonCreatedStatusIsError(t *testing.T) {
+	c := testClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+
+	if _, err := c.BuildPreview(context.Background(), uuid.New(), bytes.NewReader(nil)); err == nil {
+		t.Fatal("BuildPreview() error = nil, want an error on a non-201 response")
+	}
+}
+
+func TestClient_DestroyPreview_Succeeds(t *testing.T) {
+	jobID := uuid.New()
+	var gotPath, gotMethod string
+	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotMethod = r.URL.Path, r.Method
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	if err := c.DestroyPreview(context.Background(), jobID); err != nil {
+		t.Fatalf("DestroyPreview: %v", err)
+	}
+	if gotMethod != http.MethodDelete || gotPath != "/previews/"+jobID.String() {
+		t.Errorf("request = %s %s, want DELETE /previews/%s", gotMethod, gotPath, jobID)
+	}
+}
+
+func TestClient_DestroyPreview_NonNoContentStatusIsError(t *testing.T) {
+	c := testClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+
+	if err := c.DestroyPreview(context.Background(), uuid.New()); err == nil {
+		t.Fatal("DestroyPreview() error = nil, want an error on a non-204 response")
+	}
+}
+
 func TestClient_ExportWorkspace_DecodesBase64Payload(t *testing.T) {
 	original := buildTestTarGz(t, map[string]string{"main.go": "package main"})
 	encoded := base64.StdEncoding.EncodeToString(original)

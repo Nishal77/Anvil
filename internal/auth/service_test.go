@@ -12,19 +12,65 @@ import (
 	"github.com/anvil-dev/anvil/internal/storage"
 )
 
-// fakeStore is an in-memory userStore for unit tests. Not a testcontainers
+// fakeStore is an in-memory store for unit tests. Not a testcontainers
 // integration test — CODE-STANDARDS §3.1's whole point is that this fake is
 // two methods' worth of real work, not twenty.
 type fakeStore struct {
 	usersByEmail map[string]storage.User
 	tokens       map[string]storage.RefreshToken // keyed by string(hash)
+	secrets      map[string]storage.Secret       // keyed by userID.String()+"/"+name
+	githubIDs    map[int64]uuid.UUID
 }
 
 func newFakeStore() *fakeStore {
 	return &fakeStore{
 		usersByEmail: make(map[string]storage.User),
 		tokens:       make(map[string]storage.RefreshToken),
+		secrets:      make(map[string]storage.Secret),
 	}
+}
+
+func secretKey(userID uuid.UUID, name string) string {
+	return userID.String() + "/" + name
+}
+
+func (f *fakeStore) UpsertSecret(_ context.Context, userID uuid.UUID, name string, ciphertext, nonce []byte) error {
+	f.secrets[secretKey(userID, name)] = storage.Secret{UserID: userID, Name: name, Ciphertext: ciphertext, Nonce: nonce}
+	return nil
+}
+
+func (f *fakeStore) ListSecretNames(_ context.Context, userID uuid.UUID) ([]string, error) {
+	var names []string
+	for _, sec := range f.secrets {
+		if sec.UserID == userID {
+			names = append(names, sec.Name)
+		}
+	}
+	return names, nil
+}
+
+func (f *fakeStore) GetSecret(_ context.Context, userID uuid.UUID, name string) (storage.Secret, error) {
+	sec, ok := f.secrets[secretKey(userID, name)]
+	if !ok {
+		return storage.Secret{}, storage.ErrNotFound
+	}
+	return sec, nil
+}
+
+func (f *fakeStore) DeleteSecret(_ context.Context, userID uuid.UUID, name string) error {
+	delete(f.secrets, secretKey(userID, name))
+	return nil
+}
+
+func (f *fakeStore) SetGitHubIdentity(_ context.Context, userID uuid.UUID, githubID int64, _ string) error {
+	if existing, ok := f.githubIDs[githubID]; ok && existing != userID {
+		return storage.ErrDuplicateGitHubID
+	}
+	if f.githubIDs == nil {
+		f.githubIDs = make(map[int64]uuid.UUID)
+	}
+	f.githubIDs[githubID] = userID
+	return nil
 }
 
 func (f *fakeStore) CreateUser(_ context.Context, email, passwordHash string) (storage.User, error) {
@@ -69,14 +115,17 @@ func (f *fakeStore) RevokeRefreshToken(_ context.Context, id uuid.UUID) error {
 	return nil
 }
 
-func newTestService(t *testing.T, store userStore) *Service {
+var testEncryptionKey = []byte("01234567890123456789012345678901"[:secretEncryptionKeyBytes])
+
+func newTestService(t *testing.T, st store) *Service {
 	t.Helper()
 	svc, err := New(Config{
-		Store:           store,
+		Store:           st,
 		Logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
 		JWTSigningKey:   testSigningKey,
 		AccessTokenTTL:  15 * time.Minute,
 		RefreshTokenTTL: 7 * 24 * time.Hour,
+		EncryptionKey:   testEncryptionKey,
 	})
 	if err != nil {
 		t.Fatalf("New() error: %v", err)

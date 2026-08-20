@@ -33,4 +33,5 @@ web/dist/
 /docs/
 /.claude/
 /.claude-flow/
+**/.claude-flow/
 CLAUDE.md

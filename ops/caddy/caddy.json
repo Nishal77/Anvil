@@ -1,0 +1,48 @@
+{
+  "_doc": [
+    "Base config for the Caddy instance internal/deploy.CaddyClient talks",
+    "to (PRD §9.7, FR-062). JSON, not a Caddyfile: Caddy names Caddyfile-derived",
+    "server blocks automatically (srv0, srv1, ...) with no stable way to pin",
+    "a name from Caddyfile syntax alone, and CaddyClient.RegisterRoute needs",
+    "to address the 'previews' server by that exact name on every call.",
+    "Load with: caddy run --config ops/caddy/caddy.json",
+    "",
+    "AUTOMATIC HTTPS FOR THE PREVIEW WILDCARD IS NOT CONFIGURED HERE.",
+    "A wildcard host (*.<ANVIL_PREVIEW_DOMAIN>) can only get a certificate",
+    "via ACME's DNS-01 challenge, which requires a DNS provider plugin",
+    "built into the Caddy binary (e.g. github.com/caddy-dns/cloudflare) and",
+    "API credentials for that provider — both are real infrastructure",
+    "choices (which DNS host, which API token) this file cannot make for",
+    "you. Without it, Caddy falls back to its internal CA for the preview",
+    "server, which issues real certificates but ones browsers won't trust",
+    "automatically — fine for local development, not for a public preview",
+    "URL. See https://caddyserver.com/docs/automatic-https#dns-challenge."
+  ],
+  "admin": {
+    "listen": "127.0.0.1:2019"
+  },
+  "apps": {
+    "http": {
+      "servers": {
+        "api": {
+          "listen": [":443"],
+          "routes": [
+            {
+              "match": [{ "host": ["{$ANVIL_API_DOMAIN}"] }],
+              "handle": [
+                {
+                  "handler": "reverse_proxy",
+                  "upstreams": [{ "dial": "127.0.0.1:8080" }]
+                }
+              ]
+            }
+          ]
+        },
+        "previews": {
+          "listen": [":443"],
+          "routes": []
+        }
+      }
+    }
+  }
+}

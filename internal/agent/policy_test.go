@@ -172,6 +172,45 @@ func TestPolicyEngine_Rule6_ExhaustedBudgetDenied(t *testing.T) {
 	}
 }
 
+func TestPolicyEngine_Rule5_PrivilegedToolDeniedWithoutCreateRepo(t *testing.T) {
+	sb := newFakeSandbox()
+	registry, err := NewRegistry(append(NewFSTools(sb), NewExecTool(sb), NewStepDoneTool(), trivialPrivilegedTool("git_push"))...)
+	if err != nil {
+		t.Fatalf("NewRegistry() error = %v", err)
+	}
+	engine, err := NewPolicyEngine(PolicyEngineConfig{Registry: registry, Sandbox: sb, Budget: llm.NewInMemoryBudgetStore(150_000)})
+	if err != nil {
+		t.Fatalf("NewPolicyEngine() error = %v", err)
+	}
+
+	args, _ := json.Marshal(map[string]string{"x": "v"})
+	decision, reason := engine.Evaluate(context.Background(), uuid.New(), ToolCall{Name: "git_push", Args: args, SandboxID: "fake-sandbox", CreateRepo: false})
+	if decision != Deny {
+		t.Fatalf("Evaluate() decision = %v, want Deny for a PRIVILEGED tool when create_repo is false", decision)
+	}
+	if reason == "" {
+		t.Error("Evaluate() reason is empty on Deny")
+	}
+}
+
+func TestPolicyEngine_Rule5_PrivilegedToolAllowedWithCreateRepo(t *testing.T) {
+	sb := newFakeSandbox()
+	registry, err := NewRegistry(append(NewFSTools(sb), NewExecTool(sb), NewStepDoneTool(), trivialPrivilegedTool("git_push"))...)
+	if err != nil {
+		t.Fatalf("NewRegistry() error = %v", err)
+	}
+	engine, err := NewPolicyEngine(PolicyEngineConfig{Registry: registry, Sandbox: sb, Budget: llm.NewInMemoryBudgetStore(150_000)})
+	if err != nil {
+		t.Fatalf("NewPolicyEngine() error = %v", err)
+	}
+
+	args, _ := json.Marshal(map[string]string{"x": "v"})
+	decision, reason := engine.Evaluate(context.Background(), uuid.New(), ToolCall{Name: "git_push", Args: args, SandboxID: "fake-sandbox", CreateRepo: true})
+	if decision != Allow {
+		t.Fatalf("Evaluate() decision = %v (%s), want Allow for a PRIVILEGED tool when create_repo is true", decision, reason)
+	}
+}
+
 func TestPolicyEngine_Rule7_ValidCallAllowed(t *testing.T) {
 	sb := newFakeSandbox()
 	engine, err := NewPolicyEngine(PolicyEngineConfig{

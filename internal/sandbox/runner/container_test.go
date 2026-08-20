@@ -170,6 +170,76 @@ func TestCreateContainer_WorkspaceAndTmpAreExecutable(t *testing.T) {
 	}
 }
 
+// TestPreviewCreateOpts_SEC005SameResourceCeilingsAsSandbox proves
+// SEC-005 by construction: previewCreateOpts references the exact
+// same sandboxPidsLimit/sandboxMemoryBytes/sandboxNanoCPUs/
+// sandboxUlimitNofile constants dockerCreateOpts uses, so this test
+// only needs to catch someone copy-pasting a different literal value
+// in later, not the values matching right now.
+func TestPreviewCreateOpts_SEC005SameResourceCeilingsAsSandbox(t *testing.T) {
+	t.Parallel()
+	_, hostCfg, _ := previewCreateOpts("some-image:latest")
+
+	for _, tc := range previewCeilingChecks {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.check(hostCfg); got != "" {
+				t.Error(got)
+			}
+		})
+	}
+}
+
+// previewCeilingChecks has one entry per SEC-005 ceiling/hardening
+// setting — same pattern as sec001FlagChecks above, and for the same
+// reason: keeps the test function's own branching flat.
+var previewCeilingChecks = []struct {
+	name  string
+	check func(hostCfg *container.HostConfig) string
+}{
+	{"PidsLimit", func(hostCfg *container.HostConfig) string {
+		if hostCfg.PidsLimit == nil || *hostCfg.PidsLimit != sandboxPidsLimit {
+			return fmt.Sprintf("PidsLimit = %v, want %d", hostCfg.PidsLimit, sandboxPidsLimit)
+		}
+		return ""
+	}},
+	{"Memory", func(hostCfg *container.HostConfig) string {
+		if hostCfg.Memory != sandboxMemoryBytes {
+			return fmt.Sprintf("Memory = %d, want %d", hostCfg.Memory, sandboxMemoryBytes)
+		}
+		return ""
+	}},
+	{"MemorySwap", func(hostCfg *container.HostConfig) string {
+		if hostCfg.MemorySwap != sandboxMemoryBytes {
+			return fmt.Sprintf("MemorySwap = %d, want %d", hostCfg.MemorySwap, sandboxMemoryBytes)
+		}
+		return ""
+	}},
+	{"NanoCPUs", func(hostCfg *container.HostConfig) string {
+		if hostCfg.NanoCPUs != sandboxNanoCPUs {
+			return fmt.Sprintf("NanoCPUs = %d, want %d", hostCfg.NanoCPUs, sandboxNanoCPUs)
+		}
+		return ""
+	}},
+	{"UlimitNofile", func(hostCfg *container.HostConfig) string {
+		if len(hostCfg.Ulimits) != 1 || hostCfg.Ulimits[0].Soft != sandboxUlimitNofile || hostCfg.Ulimits[0].Hard != sandboxUlimitNofile {
+			return fmt.Sprintf("Ulimits = %+v, want one nofile ulimit at %d:%d", hostCfg.Ulimits, sandboxUlimitNofile, sandboxUlimitNofile)
+		}
+		return ""
+	}},
+	{"CapDropAll", func(hostCfg *container.HostConfig) string {
+		if !containsString(hostCfg.CapDrop, "ALL") {
+			return fmt.Sprintf("CapDrop = %v, want it to contain %q", hostCfg.CapDrop, "ALL")
+		}
+		return ""
+	}},
+	{"NoNewPrivileges", func(hostCfg *container.HostConfig) string {
+		if !containsString(hostCfg.SecurityOpt, "no-new-privileges:true") {
+			return fmt.Sprintf("SecurityOpt = %v, want it to contain %q", hostCfg.SecurityOpt, "no-new-privileges:true")
+		}
+		return ""
+	}},
+}
+
 // newTestContainer builds a Docker client, makes sure the sandbox network
 // exists, and creates one real container from dockerCreateOpts — the
 // setup every test in this file that needs a live container shares.

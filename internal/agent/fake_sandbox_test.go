@@ -25,6 +25,13 @@ type fakeSandbox struct {
 	created   int
 	destroyed int
 	commands  []string
+	writes    []fakeWrite
+	writeErr  error
+}
+
+type fakeWrite struct {
+	path string
+	data []byte
 }
 
 func newFakeSandbox() *fakeSandbox {
@@ -65,6 +72,16 @@ func (f *fakeSandbox) Exec(_ context.Context, _ string, command string, _ time.D
 		onChunk(sandbox.ExecChunk{Stream: "stderr", Data: []byte(stderr)})
 	}
 	onChunk(sandbox.ExecChunk{Final: true, ExitCode: exitCode})
+	return nil
+}
+
+func (f *fakeSandbox) WriteFile(_ context.Context, _, path string, data []byte) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.writeErr != nil {
+		return f.writeErr
+	}
+	f.writes = append(f.writes, fakeWrite{path: path, data: append([]byte(nil), data...)})
 	return nil
 }
 

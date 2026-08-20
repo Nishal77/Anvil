@@ -20,6 +20,7 @@ import (
 	"github.com/anvil-dev/anvil/internal/artifact"
 	"github.com/anvil-dev/anvil/internal/auth"
 	"github.com/anvil-dev/anvil/internal/config"
+	"github.com/anvil-dev/anvil/internal/deploy"
 	"github.com/anvil-dev/anvil/internal/events"
 	"github.com/anvil-dev/anvil/internal/llm"
 	"github.com/anvil-dev/anvil/internal/queue"
@@ -105,11 +106,16 @@ func wireControlPlane(ctx context.Context, cfg config.Config, log *slog.Logger) 
 	redisClient := events.NewRedisClient(cfg.RedisAddr)
 
 	authSvc, err := auth.New(auth.Config{
-		Store:           store,
-		Logger:          log,
-		JWTSigningKey:   cfg.JWTSigningKey,
-		AccessTokenTTL:  cfg.AccessTokenTTL,
-		RefreshTokenTTL: cfg.RefreshTokenTTL,
+		Store:              store,
+		Logger:             log,
+		JWTSigningKey:      cfg.JWTSigningKey,
+		AccessTokenTTL:     cfg.AccessTokenTTL,
+		RefreshTokenTTL:    cfg.RefreshTokenTTL,
+		EncryptionKey:      cfg.SecretEncryptionKey,
+		GitHubClientID:     cfg.GitHubClientID,
+		GitHubClientSecret: cfg.GitHubClientSecret,
+		GitHubRedirectURL:  cfg.GitHubRedirectURL,
+		GitHubWebURL:       cfg.GitHubWebURL,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("construct auth service: %w", err)
@@ -135,7 +141,7 @@ func wireControlPlane(ctx context.Context, cfg config.Config, log *slog.Logger) 
 		return nil, err
 	}
 
-	exec, planner, err := wireAgent(ctx, cfg, sandboxClient, publisher, store, artifacts, log)
+	exec, planner, err := wireAgent(ctx, cfg, sandboxClient, publisher, store, artifacts, authSvc, log)
 	if err != nil {
 		return nil, err
 	}
@@ -190,10 +196,13 @@ func wireAPIConfig(cfg config.Config, authSvc *auth.Service, store *storage.Stor
 // configured provider ladder (shared across TaskExecution, TaskPlanning,
 // and TaskSummarization — Anvil has one provider ladder, not per-role
 // ones), and the storage-backed idempotency/agent_turns stores.
-func wireAgent(ctx context.Context, cfg config.Config, sandboxClient *sandbox.Client, pub *events.Publisher, store *storage.Store, artifacts *artifact.Store, log *slog.Logger) (*agent.Executor, *agent.Planner, error) {
+func wireAgent(ctx context.Context, cfg config.Config, sandboxClient *sandbox.Client, pub *events.Publisher, store *storage.Store, artifacts *artifact.Store, authSvc *auth.Service, log *slog.Logger) (*agent.Executor, *agent.Planner, error) {
 	registry, err := agent.NewRegistry(append(
 		agent.NewFSTools(sandboxClient),
 		agent.NewExecTool(sandboxClient),
+		agent.NewGitCommitTool(sandboxClient),
+		agent.NewGitPushTool(sandboxClient, authSvc, nil, ""),
+		agent.NewGitHubOpenPRTool(sandboxClient, authSvc, nil, ""),
 		agent.NewStepDoneTool(),
 	)...)
 	if err != nil {
@@ -229,6 +238,9 @@ func wireAgent(ctx context.Context, cfg config.Config, sandboxClient *sandbox.Cl
 	if artifacts != nil { // see the same nil-interface note in wireControlPlane
 		execCfg.Artifacts = artifacts
 	}
+	if deployer := wireDeployer(cfg, sandboxClient, log); deployer != nil { // same nil-interface note
+		execCfg.Deployer = deployer
+	}
 	exec, err := agent.New(execCfg)
 	if err != nil {
 		return nil, nil, fmt.Errorf("construct executor: %w", err)
@@ -244,6 +256,28 @@ func wireAgent(ctx context.Context, cfg config.Config, sandboxClient *sandbox.Cl
 		return nil, nil, fmt.Errorf("construct planner: %w", err)
 	}
 	return exec, planner, nil
+}
+
+// wireDeployer constructs a *deploy.DockerDeployer if preview
+// deployment is configured, or returns nil — deploy is optional, the
+// same pattern as wireArtifacts: a deployment with no preview domain
+// set simply can't serve a preview, and every job that doesn't request
+// options.deploy is entirely unaffected either way.
+func wireDeployer(cfg config.Config, sandboxClient *sandbox.Client, log *slog.Logger) *deploy.DockerDeployer {
+	if cfg.PreviewDomain == "" {
+		return nil
+	}
+	caddyClient, err := deploy.NewCaddyClient(deploy.CaddyConfig{AdminAddr: cfg.CaddyAdminAddr})
+	if err != nil {
+		log.Error("construct caddy client failed, preview deployment disabled", slog.Any("err", err))
+		return nil
+	}
+	deployer, err := deploy.New(deploy.Config{Runner: sandboxClient, Caddy: caddyClient, Domain: cfg.PreviewDomain})
+	if err != nil {
+		log.Error("construct deployer failed, preview deployment disabled", slog.Any("err", err))
+		return nil
+	}
+	return deployer
 }
 
 // wireArtifacts constructs an artifact.Store if S3 is configured, or

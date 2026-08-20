@@ -141,6 +141,45 @@ func (c *Client) Exec(ctx context.Context, sandboxID, command string, timeout ti
 	return nil
 }
 
+// writeFileTimeout bounds WriteFile — it only ever moves a few hundred
+// bytes (a credential, SEC-020), so a short, fixed timeout is enough.
+const writeFileTimeout = 15 * time.Second
+
+// WriteFile writes data to path inside sandboxID. This is not part of
+// the agent tool registry the LLM can call (RULE S1 — nothing in the
+// sandbox is trusted with a general-purpose file write); it exists
+// only for internal/agent's git credential-injection path (SEC-020),
+// which writes a secret to a named pipe it created itself.
+func (c *Client) WriteFile(ctx context.Context, sandboxID, path string, data []byte) error {
+	body, err := json.Marshal(WriteRequest{SandboxID: sandboxID, Path: path, Data: data})
+	if err != nil {
+		return fmt.Errorf("sandbox: write file: encode request: %w", err)
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, writeFileTimeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.addr+"/sandboxes/"+sandboxID+"/write", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("sandbox: write file: build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("sandbox: write file: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return ErrSandboxNotFound
+	}
+	if resp.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("sandbox: write file: runner returned %s", resp.Status)
+	}
+	return nil
+}
+
 const exportWorkspaceTimeout = 60 * time.Second
 
 // exportWorkspaceCommand tars and gzips /workspace, then base64-encodes
@@ -296,6 +335,54 @@ func (c *Client) Destroy(ctx context.Context, sandboxID string) error {
 
 	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusNotFound {
 		return fmt.Errorf("sandbox: destroy: runner returned %s", resp.Status)
+	}
+	return nil
+}
+
+// BuildPreview builds buildContext (a tar or tar.gz stream with a
+// Dockerfile at its root) into an image and runs it as a preview
+// deployment for jobID (PRD §9.7, FR-060/FR-061). Returns the
+// container ID and the host port its exposed port was published to.
+func (c *Client) BuildPreview(ctx context.Context, jobID uuid.UUID, buildContext io.Reader) (BuildPreviewResponse, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.addr+"/previews/"+jobID.String(), buildContext)
+	if err != nil {
+		return BuildPreviewResponse{}, fmt.Errorf("sandbox: build preview: build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/gzip")
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return BuildPreviewResponse{}, fmt.Errorf("sandbox: build preview: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusCreated {
+		return BuildPreviewResponse{}, fmt.Errorf("sandbox: build preview: runner returned %s", resp.Status)
+	}
+
+	var out BuildPreviewResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return BuildPreviewResponse{}, fmt.Errorf("sandbox: build preview: decode response: %w", err)
+	}
+	return out, nil
+}
+
+// DestroyPreview tears down jobID's preview deployment. Safe to call
+// on a job with no preview (never deployed, or already torn down).
+func (c *Client) DestroyPreview(ctx context.Context, jobID uuid.UUID) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.addr+"/previews/"+jobID.String(), nil)
+	if err != nil {
+		return fmt.Errorf("sandbox: destroy preview: build request: %w", err)
+	}
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("sandbox: destroy preview: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("sandbox: destroy preview: runner returned %s", resp.Status)
 	}
 	return nil
 }

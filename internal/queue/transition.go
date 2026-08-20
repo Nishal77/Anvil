@@ -53,6 +53,11 @@ var allowedTransitions = map[Status]map[Status]bool{
 	StatusRunning:          {StatusQueued: true, StatusDeploying: true, StatusSucceeded: true, StatusFailed: true, StatusCancelled: true},
 	StatusAwaitingApproval: {StatusQueued: true, StatusCancelled: true},
 	StatusDeploying:        {StatusSucceeded: true, StatusFailed: true},
+	// FAILED -> QUEUED is POST /jobs/{id}/retry (US-08, RetryJob): the
+	// only edge out of a terminal status in this graph, and only this
+	// one — SUCCEEDED and CANCELLED have no retry path, matching
+	// PRD §11.2's "Retry from first failed step."
+	StatusFailed: {StatusQueued: true},
 }
 
 func isTerminal(s Status) bool {

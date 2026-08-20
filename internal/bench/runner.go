@@ -168,7 +168,7 @@ func (r *Runner) runOne(ctx context.Context, task Task) Result {
 // benchmark harness runs one task at a time. Returns once the job has
 // reached a terminal status.
 func (r *Runner) runJobToTerminal(ctx context.Context, task Task) (uuid.UUID, error) {
-	job, err := queue.CreateJob(ctx, r.pool, r.userID, task.Prompt, true)
+	job, err := queue.CreateJob(ctx, r.pool, r.userID, task.Prompt, queue.JobOptions{AutoApprove: true})
 	if err != nil {
 		return uuid.Nil, fmt.Errorf("create job: %w", err)
 	}

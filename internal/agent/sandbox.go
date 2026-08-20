@@ -13,6 +13,10 @@ import (
 // needs, declared at the consumer (CODE-STANDARDS §3.1).
 type sandboxClient interface {
 	Exec(ctx context.Context, sandboxID, command string, timeout time.Duration, onChunk func(sandbox.ExecChunk)) error
+	// WriteFile is used only by git_push's credential-injection path
+	// (SEC-020, git.go) — it is not reachable from any tool the LLM can
+	// call directly.
+	WriteFile(ctx context.Context, sandboxID, path string, data []byte) error
 }
 
 // execResult is one command's collected output — buffered rather than

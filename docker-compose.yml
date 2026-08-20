@@ -1,3 +1,10 @@
+# Caddy (PRD §9.7, FR-062) is deliberately not a service here. It needs
+# to reach 127.0.0.1:<published-port> on the Docker HOST for every
+# preview container (see internal/sandbox/runner's previewHostBindIP) —
+# running Caddy itself inside a container puts it on a different
+# network namespace, where "127.0.0.1" means the container's own
+# loopback, not the host's. Run it directly on the host instead:
+#   caddy run --config ops/caddy/caddy.json
 services:
   postgres:
     image: postgres:16-alpine

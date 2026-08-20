@@ -20,11 +20,16 @@ import (
 // fakeAuth is a minimal authService fake — CODE-STANDARDS §3.1: the fake is
 // as many methods as the interface, not a mock framework.
 type fakeAuth struct {
-	registerFn func(ctx context.Context, email, password string) (auth.TokenPair, error)
-	loginFn    func(ctx context.Context, email, password string) (auth.TokenPair, error)
-	refreshFn  func(ctx context.Context, token string) (auth.TokenPair, error)
-	logoutFn   func(ctx context.Context, callerID uuid.UUID, token string) error
-	verifyFn   func(token string) (uuid.UUID, error)
+	registerFn            func(ctx context.Context, email, password string) (auth.TokenPair, error)
+	loginFn               func(ctx context.Context, email, password string) (auth.TokenPair, error)
+	refreshFn             func(ctx context.Context, token string) (auth.TokenPair, error)
+	logoutFn              func(ctx context.Context, callerID uuid.UUID, token string) error
+	verifyFn              func(token string) (uuid.UUID, error)
+	putSecretFn           func(ctx context.Context, userID uuid.UUID, name, plaintext string) error
+	listSecretNamesFn     func(ctx context.Context, userID uuid.UUID) ([]string, error)
+	deleteSecretFn        func(ctx context.Context, userID uuid.UUID, name string) error
+	beginGitHubOAuthFn    func(userID uuid.UUID) (string, error)
+	completeGitHubOAuthFn func(ctx context.Context, code, state string) (string, error)
 }
 
 func (f *fakeAuth) Register(ctx context.Context, email, password string) (auth.TokenPair, error) {
@@ -45,6 +50,26 @@ func (f *fakeAuth) Logout(ctx context.Context, callerID uuid.UUID, token string)
 
 func (f *fakeAuth) VerifyAccessToken(token string) (uuid.UUID, error) {
 	return f.verifyFn(token)
+}
+
+func (f *fakeAuth) PutSecret(ctx context.Context, userID uuid.UUID, name, plaintext string) error {
+	return f.putSecretFn(ctx, userID, name, plaintext)
+}
+
+func (f *fakeAuth) ListSecretNames(ctx context.Context, userID uuid.UUID) ([]string, error) {
+	return f.listSecretNamesFn(ctx, userID)
+}
+
+func (f *fakeAuth) DeleteSecret(ctx context.Context, userID uuid.UUID, name string) error {
+	return f.deleteSecretFn(ctx, userID, name)
+}
+
+func (f *fakeAuth) BeginGitHubOAuth(userID uuid.UUID) (string, error) {
+	return f.beginGitHubOAuthFn(userID)
+}
+
+func (f *fakeAuth) CompleteGitHubOAuth(ctx context.Context, code, state string) (string, error) {
+	return f.completeGitHubOAuthFn(ctx, code, state)
 }
 
 type fakePinger struct {

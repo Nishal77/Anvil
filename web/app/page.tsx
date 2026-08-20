@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { createJob, getToken, setToken } from "@/lib/api";
 
 export default function HomePage() {
@@ -29,6 +30,9 @@ export default function HomePage() {
   return (
     <main>
       <h1>Anvil</h1>
+      <p>
+        <Link href="/jobs">View all jobs &rarr;</Link>
+      </p>
       <form onSubmit={handleSubmit}>
         <div>
           <label>

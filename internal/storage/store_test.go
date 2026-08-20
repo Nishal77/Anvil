@@ -66,6 +66,7 @@ func runTestMain(m *testing.M) int {
 		"../../migrations/004_agent_turns.up.sql",
 		"../../migrations/005_events.up.sql",
 		"../../migrations/006_idempotency.up.sql",
+		"../../migrations/009_secrets.up.sql",
 	} {
 		migration, err := os.ReadFile(path)
 		if err != nil {
@@ -132,6 +133,45 @@ func TestStore_CreateUser_DuplicateEmailFails(t *testing.T) {
 	_, err := testStore.CreateUser(ctx, email, "hash-two")
 	if !errors.Is(err, ErrDuplicateEmail) {
 		t.Errorf("second CreateUser() with the same email = %v, want ErrDuplicateEmail", err)
+	}
+}
+
+func TestStore_SetGitHubIdentity_Succeeds(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	user, err := testStore.CreateUser(ctx, uniqueEmail(t), "hash")
+	if err != nil {
+		t.Fatalf("CreateUser() error: %v", err)
+	}
+
+	if err := testStore.SetGitHubIdentity(ctx, user.ID, 424242, "octocat"); err != nil {
+		t.Fatalf("SetGitHubIdentity() error: %v", err)
+	}
+}
+
+// TestStore_SetGitHubIdentity_DuplicateGitHubIDFails proves the same
+// GitHub account can't be linked to two different Anvil users —
+// users.github_id is UNIQUE for exactly this reason.
+func TestStore_SetGitHubIdentity_DuplicateGitHubIDFails(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	userA, err := testStore.CreateUser(ctx, uniqueEmail(t), "hash")
+	if err != nil {
+		t.Fatalf("CreateUser() error: %v", err)
+	}
+	userB, err := testStore.CreateUser(ctx, uniqueEmail(t), "hash")
+	if err != nil {
+		t.Fatalf("CreateUser() error: %v", err)
+	}
+
+	const githubID = int64(555555)
+	if err := testStore.SetGitHubIdentity(ctx, userA.ID, githubID, "octocat"); err != nil {
+		t.Fatalf("first SetGitHubIdentity() error: %v", err)
+	}
+
+	err = testStore.SetGitHubIdentity(ctx, userB.ID, githubID, "octocat")
+	if !errors.Is(err, ErrDuplicateGitHubID) {
+		t.Errorf("second SetGitHubIdentity() with the same github_id = %v, want ErrDuplicateGitHubID", err)
 	}
 }
 

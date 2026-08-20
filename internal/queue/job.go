@@ -64,6 +64,36 @@ type Job struct {
 	// (SUCCEEDED, FAILED, or CANCELLED — ADR-012: failure preserves
 	// the artifact). Empty until then.
 	ArtifactKey string
+	// CreateRepo, set at submission (PRD §11's options.create_repo),
+	// gates every PRIVILEGED tool call this job makes (git_push,
+	// github_open_pr — PRD §16.3 rule 5). Read once per tool call
+	// via ToolCall.CreateRepo, not looked up again from this struct.
+	CreateRepo bool
+	// Deploy, set at submission (PRD §11's options.deploy), routes a
+	// successful run through the DEPLOYING state (PRD §13.1) instead
+	// of straight to SUCCEEDED.
+	Deploy bool
+	// PreviewURL is set once a deploy completes (FR-060..FR-062).
+	// Empty for a job that never requested one, or hasn't reached
+	// DEPLOYING yet.
+	PreviewURL string
+	// TokenBudget, TokensUsed, and CostUSDMicros are maintained by
+	// internal/storage's budget functions (GetJobTokenBudget,
+	// AddJobUsage) directly against these same columns — read here for
+	// display (US-07's cost readout), never written through Job.
+	TokenBudget   int64
+	TokensUsed    int64
+	CostUSDMicros int64
+}
+
+// JobOptions mirrors POST /v1/jobs' request body options (PRD §11.3) —
+// grouped into a struct because CreateJob's own parameter list would
+// otherwise exceed CODE-STANDARDS' 5-parameter limit as this set
+// grows, which it already has twice since Week 7.
+type JobOptions struct {
+	AutoApprove bool
+	CreateRepo  bool
+	Deploy      bool
 }
 
 // JobStatusFields carries the optional column writes that accompany a
@@ -90,7 +120,8 @@ const jobColumns = `id, user_id, prompt, status, COALESCE(failure_reason, ''),
 	attempt, max_attempts, COALESCE(lease_owner, ''), lease_expires_at,
 	run_after, created_at, started_at, finished_at, COALESCE(sandbox_id, ''),
 	COALESCE(plan_summary, ''), plan_risks, auto_approve, cancel_requested_at,
-	COALESCE(artifact_key, '')`
+	COALESCE(artifact_key, ''), create_repo, deploy, COALESCE(preview_url, ''),
+	token_budget, tokens_used, cost_usd_micros`
 
 // scanJob reads one jobColumns-shaped row into a Job.
 func scanJob(row pgx.Row) (*Job, error) {
@@ -100,7 +131,8 @@ func scanJob(row pgx.Row) (*Job, error) {
 		&j.Attempt, &j.MaxAttempts, &j.LeaseOwner, &j.LeaseExpiresAt,
 		&j.RunAfter, &j.CreatedAt, &j.StartedAt, &j.FinishedAt, &j.SandboxID,
 		&j.PlanSummary, &j.PlanRisks, &j.AutoApprove, &j.CancelRequestedAt,
-		&j.ArtifactKey,
+		&j.ArtifactKey, &j.CreateRepo, &j.Deploy, &j.PreviewURL,
+		&j.TokenBudget, &j.TokensUsed, &j.CostUSDMicros,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("queue: scan job: %w", err)
@@ -111,14 +143,14 @@ func scanJob(row pgx.Row) (*Job, error) {
 // const string concatenation (both operands are untyped constants) —
 // not a package-level var (CLAUDE.md §5.2).
 const createJobSQL = `
-INSERT INTO jobs (user_id, prompt, auto_approve)
-VALUES ($1, $2, $3)
+INSERT INTO jobs (user_id, prompt, auto_approve, create_repo, deploy)
+VALUES ($1, $2, $3, $4, $5)
 RETURNING ` + jobColumns
 
 // CreateJob inserts a new job in PENDING_PLAN, immediately claimable by
 // the planner.
-func CreateJob(ctx context.Context, pool *pgxpool.Pool, userID uuid.UUID, prompt string, autoApprove bool) (*Job, error) {
-	j, err := scanJob(pool.QueryRow(ctx, createJobSQL, userID, prompt, autoApprove))
+func CreateJob(ctx context.Context, pool *pgxpool.Pool, userID uuid.UUID, prompt string, opts JobOptions) (*Job, error) {
+	j, err := scanJob(pool.QueryRow(ctx, createJobSQL, userID, prompt, opts.AutoApprove, opts.CreateRepo, opts.Deploy))
 	if err != nil {
 		return nil, fmt.Errorf("queue: create job: %w", err)
 	}
@@ -164,6 +196,18 @@ const setJobArtifactKeySQL = `UPDATE jobs SET artifact_key = $2 WHERE id = $1`
 func SetJobArtifactKey(ctx context.Context, pool *pgxpool.Pool, jobID uuid.UUID, artifactKey string) error {
 	if _, err := pool.Exec(ctx, setJobArtifactKeySQL, jobID, artifactKey); err != nil {
 		return fmt.Errorf("queue: set artifact key for job %s: %w", jobID, err)
+	}
+	return nil
+}
+
+const setJobPreviewURLSQL = `UPDATE jobs SET preview_url = $2 WHERE id = $1`
+
+// SetJobPreviewURL records jobID's deployed preview URL. Same
+// reasoning as SetJobSandboxID: a separate statement from Transition,
+// since this isn't a status change (I-1 doesn't apply).
+func SetJobPreviewURL(ctx context.Context, pool *pgxpool.Pool, jobID uuid.UUID, previewURL string) error {
+	if _, err := pool.Exec(ctx, setJobPreviewURLSQL, jobID, previewURL); err != nil {
+		return fmt.Errorf("queue: set preview url for job %s: %w", jobID, err)
 	}
 	return nil
 }

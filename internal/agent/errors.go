@@ -23,11 +23,8 @@ var (
 	// Rule 4.
 	ErrCommandBlocked = errors.New("agent: command blocked by policy")
 
-	// ErrToolPrivileged means a PRIVILEGED tool was called without
-	// create_repo set. Rule 5. Unreachable this week — no PRIVILEGED
-	// tool is registered yet (git_push/github_open_pr land in Week 8)
-	// — kept so PolicyEngine's rule set is complete now, not patched
-	// in later.
+	// ErrToolPrivileged means a PRIVILEGED tool (git_push,
+	// github_open_pr) was called without create_repo set. Rule 5.
 	ErrToolPrivileged = errors.New("agent: privileged tool requires create_repo")
 
 	// ErrStepTurnLimitExceeded means MAX_TURNS_PER_STEP was reached

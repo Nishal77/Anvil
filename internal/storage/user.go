@@ -58,3 +58,21 @@ func (s *Store) GetUserByEmail(ctx context.Context, email string) (User, error) 
 	}
 	return u, nil
 }
+
+// SetGitHubIdentity records that userID has linked the given GitHub
+// account. Returns ErrDuplicateGitHubID if that GitHub account is
+// already linked to a different Anvil user — users.github_id is
+// UNIQUE, so this is the only way that constraint can fire here.
+func (s *Store) SetGitHubIdentity(ctx context.Context, userID uuid.UUID, githubID int64, githubLogin string) error {
+	const q = `UPDATE users SET github_id = $1, github_login = $2 WHERE id = $3`
+
+	_, err := s.pool.Exec(ctx, q, githubID, githubLogin, userID)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == pgUniqueViolation {
+			return fmt.Errorf("set github identity: %w", ErrDuplicateGitHubID)
+		}
+		return fmt.Errorf("set github identity: %w", err)
+	}
+	return nil
+}

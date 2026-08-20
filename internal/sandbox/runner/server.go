@@ -21,6 +21,7 @@ type Config struct {
 	Image       string        // pinned workspace image, referenced by digest
 	MaxLifetime time.Duration // default 30m — sandboxes older than this get destroyed automatically
 	ExecTimeout time.Duration // default 300s — how long a single command is allowed to run
+	PreviewTTL  time.Duration // default 2h (FR-063) — previews older than this get destroyed automatically
 }
 
 func (c *Config) setDefaults() {
@@ -29,6 +30,9 @@ func (c *Config) setDefaults() {
 	}
 	if c.ExecTimeout <= 0 {
 		c.ExecTimeout = 300 * time.Second
+	}
+	if c.PreviewTTL <= 0 {
+		c.PreviewTTL = 2 * time.Hour
 	}
 }
 
@@ -45,6 +49,14 @@ func (c Config) validate() error {
 	return nil
 }
 
+// previewInfo is what the Server tracks about one running preview
+// deployment, keyed by job ID (the natural key a caller addresses a
+// preview by — there is at most one live preview per job).
+type previewInfo struct {
+	containerID string
+	createdAt   time.Time
+}
+
 // Server implements the sandbox protocol's HTTP handlers and owns the
 // Docker client it builds internally — nothing outside this package ever
 // holds or passes in a Docker client directly.
@@ -55,12 +67,14 @@ type Server struct {
 	image       string
 	maxLifetime time.Duration
 	execTimeout time.Duration
+	previewTTL  time.Duration
 
-	// mu guards containers. Held only for map access, never across a
-	// Docker API call — a slow create/destroy must not block every other
-	// request.
+	// mu guards containers and previews. Held only for map access,
+	// never across a Docker API call — a slow create/destroy must not
+	// block every other request.
 	mu         sync.Mutex
-	containers map[string]time.Time // sandboxID -> created at
+	containers map[string]time.Time   // sandboxID -> created at
+	previews   map[string]previewInfo // jobID -> info
 }
 
 // New constructs a Server, including its own Docker client.
@@ -81,13 +95,18 @@ func New(cfg Config) (*Server, error) {
 		image:       cfg.Image,
 		maxLifetime: cfg.MaxLifetime,
 		execTimeout: cfg.ExecTimeout,
+		previewTTL:  cfg.PreviewTTL,
 		containers:  make(map[string]time.Time),
+		previews:    make(map[string]previewInfo),
 	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /sandboxes", s.handleCreate)
 	mux.HandleFunc("POST /sandboxes/{id}/exec", s.handleExec)
+	mux.HandleFunc("POST /sandboxes/{id}/write", s.handleWriteFile)
 	mux.HandleFunc("DELETE /sandboxes/{id}", s.handleDestroy)
+	mux.HandleFunc("POST /previews/{job_id}", s.handleBuildPreview)
+	mux.HandleFunc("DELETE /previews/{job_id}", s.handleDestroyPreview)
 
 	s.httpServer = &http.Server{Addr: cfg.Addr, Handler: mux}
 	return s, nil
@@ -98,8 +117,8 @@ func New(cfg Config) (*Server, error) {
 // shutdown, it destroys every container it's still tracking before
 // returning, so a clean shutdown never leaves containers running.
 func (s *Server) Run(ctx context.Context) error {
-	if err := ensureSandboxNetwork(ctx, s.docker); err != nil {
-		return fmt.Errorf("runner: ensure sandbox network: %w", err)
+	if err := ensureNetworks(ctx, s.docker); err != nil {
+		return err
 	}
 
 	serveErr := make(chan error, 1)
@@ -164,6 +183,10 @@ func (s *Server) destroyAllTracked(ctx context.Context) {
 	for id := range s.containers {
 		ids = append(ids, id)
 	}
+	previews := make(map[string]previewInfo, len(s.previews))
+	for jobID, info := range s.previews {
+		previews[jobID] = info
+	}
 	s.mu.Unlock()
 
 	for _, id := range ids {
@@ -173,4 +196,32 @@ func (s *Server) destroyAllTracked(ctx context.Context) {
 		}
 		s.untrackContainer(id)
 	}
+	for jobID, info := range previews {
+		if err := destroyPreview(ctx, s.docker, jobID, info.containerID); err != nil {
+			s.log.Error("destroy preview on shutdown failed", slog.String("job_id", jobID), slog.Any("err", err))
+			continue
+		}
+		s.untrackPreview(jobID)
+	}
+}
+
+func (s *Server) trackPreview(jobID, containerID string) {
+	s.mu.Lock()
+	s.previews[jobID] = previewInfo{containerID: containerID, createdAt: time.Now()}
+	s.mu.Unlock()
+}
+
+func (s *Server) untrackPreview(jobID string) {
+	s.mu.Lock()
+	delete(s.previews, jobID)
+	s.mu.Unlock()
+}
+
+// lookupPreview returns jobID's tracked container ID, or ok=false if
+// no preview is tracked for it.
+func (s *Server) lookupPreview(jobID string) (containerID string, ok bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	info, ok := s.previews[jobID]
+	return info.containerID, ok
 }

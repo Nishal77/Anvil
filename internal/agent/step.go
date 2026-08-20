@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+
+	"github.com/google/uuid"
 )
 
 // stepDoneToolName is checked directly by Executor's turn loop to
@@ -36,7 +38,7 @@ func NewStepDoneTool() Tool {
 			"required": ["summary", "success"]
 		}`),
 		PolicyClass: PolicySafe,
-		Handler: func(_ context.Context, _ string, args json.RawMessage) (string, error) {
+		Handler: func(_ context.Context, _ string, _ uuid.UUID, args json.RawMessage) (string, error) {
 			var in stepDoneArgs
 			if err := json.Unmarshal(args, &in); err != nil {
 				return "", fmt.Errorf("agent: step_done: decode args: %w", err)

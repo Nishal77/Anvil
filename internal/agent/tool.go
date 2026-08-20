@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sort"
 
+	"github.com/google/uuid"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
 	"github.com/anvil-dev/anvil/internal/llm"
@@ -23,13 +24,15 @@ const (
 	PolicyPrivileged
 )
 
-// Handler executes one validated tool call inside sandboxID and
+// Handler executes one validated tool call inside sandboxID, on behalf
+// of userID (the job owner — needed by tools that resolve one of that
+// user's stored secrets, e.g. git_push's GitHub token, SEC-020), and
 // returns the observation text fed back to the model. A non-nil error
 // means the harness itself failed (sandbox gone, exec timeout) — a
 // tool-level failure (e.g. exec exit 1) belongs IN the observation
 // string, not here, so the model sees it as a normal turn result it
 // can act on.
-type Handler func(ctx context.Context, sandboxID string, args json.RawMessage) (string, error)
+type Handler func(ctx context.Context, sandboxID string, userID uuid.UUID, args json.RawMessage) (string, error)
 
 // Tool is one entry in the Registry: schema, risk class, and
 // implementation together, so ProviderTools generates the

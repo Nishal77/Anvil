@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -84,6 +85,27 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 	flusher.Flush()
 }
 
+// handleWriteFile — POST /sandboxes/{id}/write. Writes req.Data to
+// req.Path inside the sandbox via a short-lived `cat > path` exec —
+// the control-plane side of SEC-020's named-pipe credential injection
+// (see sandbox.WriteRequest's doc comment).
+func (s *Server) handleWriteFile(w http.ResponseWriter, r *http.Request) {
+	sandboxID := r.PathValue("id")
+
+	var req sandbox.WriteRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "malformed request body", http.StatusBadRequest)
+		return
+	}
+
+	if err := writeStdin(r.Context(), s.docker, sandboxID, req.Path, req.Data); err != nil {
+		s.log.ErrorContext(r.Context(), "write stdin failed", slog.String("sandbox_id", sandboxID), slog.Any("err", err))
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // handleDestroy — DELETE /sandboxes/{id}. Idempotent.
 func (s *Server) handleDestroy(w http.ResponseWriter, r *http.Request) {
 	sandboxID := r.PathValue("id")
@@ -94,5 +116,63 @@ func (s *Server) handleDestroy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.untrackContainer(sandboxID)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// previewBuildTimeout bounds how long a preview's image build and
+// startup may take — generous, since a real project's dependency
+// install (npm ci, go mod download) is the dominant cost, not the
+// container start itself.
+const previewBuildTimeout = 5 * time.Minute
+
+// handleBuildPreview — POST /previews/{job_id}. The request body is
+// the raw build context (a tar or tar.gz stream, Dockerfile
+// guaranteed present by internal/deploy — task 9.3) for
+// docker.ImageBuild, not a JSON envelope: previews are one-shot
+// image-build-then-run operations, not a stream of chunks, so there's
+// nothing the JSON request types elsewhere in this package would add.
+func (s *Server) handleBuildPreview(w http.ResponseWriter, r *http.Request) {
+	jobID := r.PathValue("job_id")
+
+	ctx, cancel := context.WithTimeout(r.Context(), previewBuildTimeout)
+	defer cancel()
+
+	if err := buildPreviewImage(ctx, s.docker, jobID, r.Body); err != nil {
+		s.log.ErrorContext(r.Context(), "build preview image failed", slog.String("job_id", jobID), slog.Any("err", err))
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	containerID, hostPort, err := runPreviewContainer(ctx, s.docker, jobID)
+	if err != nil {
+		s.log.ErrorContext(r.Context(), "run preview container failed", slog.String("job_id", jobID), slog.Any("err", err))
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	s.trackPreview(jobID, containerID)
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	_ = json.NewEncoder(w).Encode(sandbox.BuildPreviewResponse{ContainerID: containerID, HostPort: hostPort})
+}
+
+// handleDestroyPreview — DELETE /previews/{job_id}. Idempotent: a job
+// with no tracked preview (never deployed, or already torn down) is
+// treated the same as a successful destroy.
+func (s *Server) handleDestroyPreview(w http.ResponseWriter, r *http.Request) {
+	jobID := r.PathValue("job_id")
+
+	containerID, ok := s.lookupPreview(jobID)
+	if !ok {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	if err := destroyPreview(r.Context(), s.docker, jobID, containerID); err != nil {
+		s.log.ErrorContext(r.Context(), "destroy preview failed", slog.String("job_id", jobID), slog.Any("err", err))
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	s.untrackPreview(jobID)
 	w.WriteHeader(http.StatusNoContent)
 }

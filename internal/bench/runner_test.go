@@ -70,6 +70,10 @@ func (f *fakeSandbox) ExportWorkspace(context.Context, string) (io.ReadCloser, e
 	return io.NopCloser(bytes.NewReader(f.workspace)), nil
 }
 
+func (f *fakeSandbox) WriteFile(context.Context, string, string, []byte) error {
+	return nil
+}
+
 // fakeArtifactStore serves back whatever tar.gz bytes were uploaded
 // via the executor's real upload path — Runner.runCheck downloads
 // through this same interface in production.

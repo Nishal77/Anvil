@@ -44,6 +44,19 @@ func ensureSandboxNetwork(ctx context.Context, docker *client.Client) error {
 	return nil
 }
 
+// ensureNetworks makes sure both the sandbox and preview networks
+// exist — split out of Server.Run purely to keep that function's
+// branching within CLAUDE.md's cyclomatic-complexity limit.
+func ensureNetworks(ctx context.Context, docker *client.Client) error {
+	if err := ensureSandboxNetwork(ctx, docker); err != nil {
+		return fmt.Errorf("runner: ensure sandbox network: %w", err)
+	}
+	if err := ensurePreviewNetwork(ctx, docker); err != nil {
+		return fmt.Errorf("runner: ensure preview network: %w", err)
+	}
+	return nil
+}
+
 // createContainer creates and starts one hardened workspace container and
 // returns its ID.
 func createContainer(ctx context.Context, docker *client.Client, image string) (string, error) {
@@ -74,11 +87,12 @@ func destroyContainer(ctx context.Context, docker *client.Client, containerID st
 	return nil
 }
 
-// reapLoop periodically destroys any tracked container older than
-// maxLifetime, until ctx is cancelled. destroyAllTracked handles cleanup
-// on a normal shutdown; this catches the containers that slip past that
-// — one left behind by a crashed command, or a client that never called
-// Destroy.
+// reapLoop periodically destroys any tracked container or preview past
+// its lifetime, until ctx is cancelled. destroyAllTracked handles
+// cleanup on a normal shutdown; this catches the ones that slip past
+// that — a sandbox left behind by a crashed command, a client that
+// never called Destroy, or a preview left running past PREVIEW_TTL
+// (FR-063) because nobody ever called DELETE /previews/{job_id}.
 func (s *Server) reapLoop(ctx context.Context) {
 	ticker := time.NewTicker(reapInterval)
 	defer ticker.Stop()
@@ -91,6 +105,11 @@ func (s *Server) reapLoop(ctx context.Context) {
 				s.log.ErrorContext(ctx, "reap failed", "err", err)
 			} else if n > 0 {
 				s.log.InfoContext(ctx, "reaped stale containers", "count", n)
+			}
+			if n, err := s.reapPreviews(ctx); err != nil {
+				s.log.ErrorContext(ctx, "reap previews failed", "err", err)
+			} else if n > 0 {
+				s.log.InfoContext(ctx, "reaped stale previews", "count", n)
 			}
 		}
 	}
@@ -113,6 +132,29 @@ func (s *Server) reap(ctx context.Context) (destroyed int, err error) {
 			return destroyed, fmt.Errorf("reap container %s: %w", id, destroyErr)
 		}
 		s.untrackContainer(id)
+		destroyed++
+	}
+	return destroyed, nil
+}
+
+// reapPreviews destroys every tracked preview whose age exceeds
+// previewTTL (FR-063, default 2h).
+func (s *Server) reapPreviews(ctx context.Context) (destroyed int, err error) {
+	s.mu.Lock()
+	stale := make(map[string]string, len(s.previews)) // jobID -> containerID
+	now := time.Now()
+	for jobID, info := range s.previews {
+		if now.Sub(info.createdAt) > s.previewTTL {
+			stale[jobID] = info.containerID
+		}
+	}
+	s.mu.Unlock()
+
+	for jobID, containerID := range stale {
+		if destroyErr := destroyPreview(ctx, s.docker, jobID, containerID); destroyErr != nil {
+			return destroyed, fmt.Errorf("reap preview for job %s: %w", jobID, destroyErr)
+		}
+		s.untrackPreview(jobID)
 		destroyed++
 	}
 	return destroyed, nil

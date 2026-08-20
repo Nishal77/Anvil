@@ -144,7 +144,7 @@ func TestPlanner_RunPlan_PersistsAndTransitionsJob(t *testing.T) {
 func seedClaimedPlanningJob(t *testing.T, pool *pgxpool.Pool) *queue.Job {
 	t.Helper()
 	userID := seedTestUser(t, pool)
-	job, err := queue.CreateJob(context.Background(), pool, userID, "build a thing", false)
+	job, err := queue.CreateJob(context.Background(), pool, userID, "build a thing", queue.JobOptions{})
 	if err != nil {
 		t.Fatalf("CreateJob: %v", err)
 	}

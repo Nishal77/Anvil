@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 const (
@@ -29,7 +31,7 @@ func NewExecTool(client sandboxClient) Tool {
 			"required": ["command"]
 		}`),
 		PolicyClass: PolicyGuarded,
-		Handler: func(ctx context.Context, sandboxID string, args json.RawMessage) (string, error) {
+		Handler: func(ctx context.Context, sandboxID string, _ uuid.UUID, args json.RawMessage) (string, error) {
 			var in struct {
 				Command  string `json:"command"`
 				TimeoutS int    `json:"timeout_s"`

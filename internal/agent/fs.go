@@ -8,6 +8,8 @@ import (
 	"path"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // workspaceRoot is fixed by SEC-001's tmpfs mount — every sandbox
@@ -88,7 +90,7 @@ func fsReadTool(client sandboxClient) Tool {
 			"required": ["path"]
 		}`),
 		PolicyClass: PolicySafe,
-		Handler: func(ctx context.Context, sandboxID string, args json.RawMessage) (string, error) {
+		Handler: func(ctx context.Context, sandboxID string, _ uuid.UUID, args json.RawMessage) (string, error) {
 			var in struct {
 				Path      string `json:"path"`
 				StartLine int    `json:"start_line"`
@@ -141,7 +143,7 @@ func fsWriteTool(client sandboxClient) Tool {
 			"required": ["path", "content"]
 		}`),
 		PolicyClass: PolicySafe,
-		Handler: func(ctx context.Context, sandboxID string, args json.RawMessage) (string, error) {
+		Handler: func(ctx context.Context, sandboxID string, _ uuid.UUID, args json.RawMessage) (string, error) {
 			var in struct {
 				Path    string `json:"path"`
 				Content string `json:"content"`
@@ -182,7 +184,7 @@ func fsListTool(client sandboxClient) Tool {
 			"required": ["path"]
 		}`),
 		PolicyClass: PolicySafe,
-		Handler: func(ctx context.Context, sandboxID string, args json.RawMessage) (string, error) {
+		Handler: func(ctx context.Context, sandboxID string, _ uuid.UUID, args json.RawMessage) (string, error) {
 			var in struct {
 				Path  string `json:"path"`
 				Depth int    `json:"depth"`
@@ -224,7 +226,7 @@ func fsSearchTool(client sandboxClient) Tool {
 			"required": ["pattern"]
 		}`),
 		PolicyClass: PolicySafe,
-		Handler: func(ctx context.Context, sandboxID string, args json.RawMessage) (string, error) {
+		Handler: func(ctx context.Context, sandboxID string, _ uuid.UUID, args json.RawMessage) (string, error) {
 			var in struct {
 				Pattern string `json:"pattern"`
 				Path    string `json:"path"`

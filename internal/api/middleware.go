@@ -110,11 +110,13 @@ func requireAuth(v verifier) func(http.Handler) http.Handler {
 	}
 }
 
-// requireAuthSSE is requireAuth's counterpart for the one route a native
-// browser EventSource has to hit: EventSource can't set an Authorization
-// header at all, so this also accepts the token as ?access_token=. Every
-// other route stays header-only.
-func requireAuthSSE(v verifier) func(http.Handler) http.Handler {
+// requireAuthQueryToken is requireAuth's counterpart for routes a
+// browser reaches by direct navigation rather than a fetch/XHR call it
+// controls headers on — EventSource can't set an Authorization header
+// at all, and neither can a plain `<a href>` download link, so both
+// also accept the token as ?access_token=. Every other route stays
+// header-only.
+func requireAuthQueryToken(v verifier) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			token, ok := bearerToken(r)

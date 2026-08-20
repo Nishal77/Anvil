@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/google/uuid"
 )
 
 // TestFsReadTool_AwkCommandHasNoDoubleDash is a regression test for a
@@ -17,7 +19,7 @@ func TestFsReadTool_AwkCommandHasNoDoubleDash(t *testing.T) {
 	tool := fsReadTool(sb)
 
 	args, _ := json.Marshal(map[string]string{"path": "app/main.go"})
-	if _, err := tool.Handler(context.Background(), "fake-sandbox", args); err != nil {
+	if _, err := tool.Handler(context.Background(), "fake-sandbox", uuid.New(), args); err != nil {
 		t.Fatalf("Handler() error = %v", err)
 	}
 
@@ -40,7 +42,7 @@ func TestFsListTool_ResolvesRelativePathUnderWorkspaceRoot(t *testing.T) {
 	tool := fsListTool(sb)
 
 	args, _ := json.Marshal(map[string]string{"path": "app"})
-	if _, err := tool.Handler(context.Background(), "fake-sandbox", args); err != nil {
+	if _, err := tool.Handler(context.Background(), "fake-sandbox", uuid.New(), args); err != nil {
 		t.Fatalf("Handler() error = %v", err)
 	}
 
@@ -66,7 +68,7 @@ func TestFsWriteTool_WritesViaBase64(t *testing.T) {
 	tool := fsWriteTool(sb)
 
 	args, _ := json.Marshal(map[string]string{"path": "app/main.go", "content": "package main"})
-	obs, err := tool.Handler(context.Background(), "fake-sandbox", args)
+	obs, err := tool.Handler(context.Background(), "fake-sandbox", uuid.New(), args)
 	if err != nil {
 		t.Fatalf("Handler() error = %v", err)
 	}

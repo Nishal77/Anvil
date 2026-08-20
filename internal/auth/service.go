@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"time"
 
 	"github.com/google/uuid"
@@ -12,23 +13,54 @@ import (
 	"github.com/anvil-dev/anvil/internal/storage"
 )
 
-// userStore is the subset of storage the auth service needs (CODE-STANDARDS
+// store is the subset of storage the auth service needs (CODE-STANDARDS
 // §3.1 — declared at the consumer, not exported by storage).
-type userStore interface {
+type store interface {
 	CreateUser(ctx context.Context, email, passwordHash string) (storage.User, error)
 	GetUserByEmail(ctx context.Context, email string) (storage.User, error)
 	CreateRefreshToken(ctx context.Context, userID uuid.UUID, tokenHash []byte, expiresAt time.Time) (storage.RefreshToken, error)
 	GetRefreshTokenByHash(ctx context.Context, tokenHash []byte) (storage.RefreshToken, error)
 	RevokeRefreshToken(ctx context.Context, id uuid.UUID) error
+	UpsertSecret(ctx context.Context, userID uuid.UUID, name string, ciphertext, nonce []byte) error
+	ListSecretNames(ctx context.Context, userID uuid.UUID) ([]string, error)
+	GetSecret(ctx context.Context, userID uuid.UUID, name string) (storage.Secret, error)
+	DeleteSecret(ctx context.Context, userID uuid.UUID, name string) error
+	SetGitHubIdentity(ctx context.Context, userID uuid.UUID, githubID int64, githubLogin string) error
 }
 
 // Config configures a Service.
 type Config struct {
-	Store           userStore
+	Store           store
 	Logger          *slog.Logger
 	JWTSigningKey   []byte
 	AccessTokenTTL  time.Duration
 	RefreshTokenTTL time.Duration
+	// EncryptionKey seals user secrets (PRD §16.5) — AES-256-GCM, so it
+	// must be exactly 32 bytes. Never persisted: it lives only in
+	// ANVIL_SECRET_ENCRYPTION_KEY, so a database dump alone can never
+	// yield a usable secret.
+	EncryptionKey []byte
+	// GitHub OAuth app credentials (FR-001). All three optional
+	// together: an unset GitHubClientID means GitHub linking is simply
+	// unavailable rather than failing startup, matching S3's
+	// unset-means-skipped pattern — but if any one of the three is set,
+	// all three are required, since a partially configured OAuth app
+	// can't redeem a code even once.
+	GitHubClientID     string
+	GitHubClientSecret string
+	GitHubRedirectURL  string
+	// GitHubWebURL is the frontend base URL CompleteGitHubOAuth sends
+	// the browser back to after linking. Empty means no frontend is
+	// configured — the callback returns a JSON confirmation instead of
+	// redirecting.
+	GitHubWebURL string
+	// GitHubOAuthBaseURL and GitHubAPIBaseURL default to github.com and
+	// api.github.com; overridable so tests never make a real network
+	// call (CLAUDE.md T3's analog for a non-LLM external API).
+	GitHubOAuthBaseURL string
+	GitHubAPIBaseURL   string
+	// HTTPClient calls github.com. Nil defaults to http.DefaultClient.
+	HTTPClient *http.Client
 }
 
 func (c Config) validate() error {
@@ -47,7 +79,24 @@ func (c Config) validate() error {
 	if c.RefreshTokenTTL <= 0 {
 		return errors.New("auth: config: RefreshTokenTTL must be positive")
 	}
+	if len(c.EncryptionKey) != secretEncryptionKeyBytes {
+		return fmt.Errorf("auth: config: EncryptionKey must be %d bytes, got %d", secretEncryptionKeyBytes, len(c.EncryptionKey))
+	}
+	githubFieldsSet := boolCount(c.GitHubClientID != "", c.GitHubClientSecret != "", c.GitHubRedirectURL != "")
+	if githubFieldsSet != 0 && githubFieldsSet != 3 {
+		return errors.New("auth: config: GitHubClientID, GitHubClientSecret, and GitHubRedirectURL must be set together or not at all")
+	}
 	return nil
+}
+
+func boolCount(bs ...bool) int {
+	n := 0
+	for _, b := range bs {
+		if b {
+			n++
+		}
+	}
+	return n
 }
 
 // TokenPair is an issued access token and refresh token.
@@ -57,13 +106,23 @@ type TokenPair struct {
 	ExpiresAt    time.Time
 }
 
-// Service implements registration, login, token refresh, and logout.
+// Service implements registration, login, token refresh, logout, and
+// user secret storage.
 type Service struct {
-	store           userStore
+	store           store
 	log             *slog.Logger
 	signingKey      []byte
 	accessTokenTTL  time.Duration
 	refreshTokenTTL time.Duration
+	encryptionKey   []byte
+
+	githubClientID     string
+	githubClientSecret string
+	githubRedirectURL  string
+	githubWebURL       string
+	githubOAuthBaseURL string
+	githubAPIBaseURL   string
+	httpClient         *http.Client
 
 	// dummyPasswordHash is verified against on a login attempt for an
 	// unknown email, so Login takes the same time whether or not the
@@ -85,13 +144,34 @@ func New(cfg Config) (*Service, error) {
 		return nil, fmt.Errorf("auth: precompute dummy password hash: %w", err)
 	}
 
+	httpClient := cfg.HTTPClient
+	if httpClient == nil {
+		httpClient = http.DefaultClient
+	}
+	githubOAuthBaseURL := cfg.GitHubOAuthBaseURL
+	if githubOAuthBaseURL == "" {
+		githubOAuthBaseURL = defaultGitHubOAuthBaseURL
+	}
+	githubAPIBaseURL := cfg.GitHubAPIBaseURL
+	if githubAPIBaseURL == "" {
+		githubAPIBaseURL = defaultGitHubAPIBaseURL
+	}
+
 	return &Service{
-		store:             cfg.Store,
-		log:               cfg.Logger,
-		signingKey:        cfg.JWTSigningKey,
-		accessTokenTTL:    cfg.AccessTokenTTL,
-		refreshTokenTTL:   cfg.RefreshTokenTTL,
-		dummyPasswordHash: dummyHash,
+		store:              cfg.Store,
+		log:                cfg.Logger,
+		signingKey:         cfg.JWTSigningKey,
+		accessTokenTTL:     cfg.AccessTokenTTL,
+		refreshTokenTTL:    cfg.RefreshTokenTTL,
+		encryptionKey:      cfg.EncryptionKey,
+		githubClientID:     cfg.GitHubClientID,
+		githubClientSecret: cfg.GitHubClientSecret,
+		githubRedirectURL:  cfg.GitHubRedirectURL,
+		githubWebURL:       cfg.GitHubWebURL,
+		githubOAuthBaseURL: githubOAuthBaseURL,
+		githubAPIBaseURL:   githubAPIBaseURL,
+		httpClient:         httpClient,
+		dummyPasswordHash:  dummyHash,
 	}, nil
 }
 

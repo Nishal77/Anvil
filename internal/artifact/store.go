@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/minio/minio-go/v7"
@@ -88,6 +89,18 @@ func (s *Store) Upload(ctx context.Context, jobID uuid.UUID, r io.Reader, size i
 		return "", fmt.Errorf("artifact: upload job %s: %w", jobID, err)
 	}
 	return key, nil
+}
+
+// PresignedDownloadURL returns a time-limited URL a client can
+// download jobID's archive from directly, bypassing the control plane
+// entirely for the transfer itself (PRD §11.2: GET /jobs/{id}/artifact
+// responds 302 to exactly this URL).
+func (s *Store) PresignedDownloadURL(ctx context.Context, jobID uuid.UUID, expiry time.Duration) (string, error) {
+	u, err := s.client.PresignedGetObject(ctx, s.bucket, objectKey(jobID), expiry, nil)
+	if err != nil {
+		return "", fmt.Errorf("artifact: presigned download url for job %s: %w", jobID, err)
+	}
+	return u.String(), nil
 }
 
 // ErrNotFound means jobID has no uploaded artifact.

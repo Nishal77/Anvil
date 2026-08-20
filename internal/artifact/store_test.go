@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/testcontainers/testcontainers-go"
@@ -86,6 +88,49 @@ func TestStore_UploadDownloadRoundTrip(t *testing.T) {
 	}
 	if string(got) != content {
 		t.Errorf("downloaded content = %q, want %q", got, content)
+	}
+}
+
+// TestStore_PresignedDownloadURL_ServesTheUploadedContent proves the
+// URL PresignedDownloadURL returns is a real, directly-fetchable link
+// to the uploaded object — not just a non-empty string.
+func TestStore_PresignedDownloadURL_ServesTheUploadedContent(t *testing.T) {
+	cfg := startTestMinIO(t)
+	store, err := New(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	jobID := uuid.New()
+	content := "this is a fake tar.gz archive"
+	if _, err := store.Upload(context.Background(), jobID, strings.NewReader(content), int64(len(content))); err != nil {
+		t.Fatalf("Upload: %v", err)
+	}
+
+	url, err := store.PresignedDownloadURL(context.Background(), jobID, time.Minute)
+	if err != nil {
+		t.Fatalf("PresignedDownloadURL: %v", err)
+	}
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
+	if err != nil {
+		t.Fatalf("build presigned url request: %v", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("fetch presigned url: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("presigned url returned status %d, want 200", resp.StatusCode)
+	}
+	got, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read presigned response body: %v", err)
+	}
+	if string(got) != content {
+		t.Errorf("presigned url content = %q, want %q", got, content)
 	}
 }
 

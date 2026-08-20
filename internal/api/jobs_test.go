@@ -3,12 +3,14 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -16,6 +18,22 @@ import (
 )
 
 func newJobsTestServer(t *testing.T, userID uuid.UUID, pub *fakePublisher) *Server {
+	t.Helper()
+	return newJobsTestServerWithArtifacts(t, userID, pub, nil)
+}
+
+// fakeArtifactStore is a minimal artifactDownloader fake — CODE-STANDARDS
+// §3.1.
+type fakeArtifactStore struct {
+	url string
+	err error
+}
+
+func (f *fakeArtifactStore) PresignedDownloadURL(_ context.Context, _ uuid.UUID, _ time.Duration) (string, error) {
+	return f.url, f.err
+}
+
+func newJobsTestServerWithArtifacts(t *testing.T, userID uuid.UUID, pub *fakePublisher, artifacts artifactDownloader) *Server {
 	t.Helper()
 	a := &fakeAuth{verifyFn: func(_ string) (uuid.UUID, error) { return userID, nil }}
 	srv, err := New(Config{
@@ -26,6 +44,7 @@ func newJobsTestServer(t *testing.T, userID uuid.UUID, pub *fakePublisher) *Serv
 		Hub:        &fakeHub{},
 		EventStore: &fakeEventStore{},
 		Publisher:  pub,
+		Artifacts:  artifacts,
 		Logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	if err != nil {
@@ -160,6 +179,45 @@ func TestJobs_HandleGetJob_ReturnsOwnJob(t *testing.T) {
 	}
 }
 
+// TestJobs_HandleGetJob_IncludesCostReadout is US-07: token spend and
+// remaining budget must be visible per job, not just aggregated
+// somewhere internal.
+func TestJobs_HandleGetJob_IncludesCostReadout(t *testing.T) {
+	t.Parallel()
+	userID := seedAPITestUser(t)
+	job, err := queue.CreateQueuedJob(context.Background(), testPool, userID, "my job")
+	if err != nil {
+		t.Fatalf("CreateQueuedJob: %v", err)
+	}
+	if _, err := testPool.Exec(context.Background(),
+		`UPDATE jobs SET tokens_used = 1234, cost_usd_micros = 56700 WHERE id = $1`, job.ID,
+	); err != nil {
+		t.Fatalf("set token usage: %v", err)
+	}
+
+	srv := newJobsTestServer(t, userID, &fakePublisher{})
+	req := authedRequest(http.MethodGet, "/v1/jobs/"+job.ID.String(), "")
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp jobResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.TokensUsed != 1234 {
+		t.Errorf("TokensUsed = %d, want 1234", resp.TokensUsed)
+	}
+	if resp.CostUSDMicros != 56700 {
+		t.Errorf("CostUSDMicros = %d, want 56700", resp.CostUSDMicros)
+	}
+	if resp.TokenBudget == 0 {
+		t.Error("TokenBudget = 0, want the job's default token budget")
+	}
+}
+
 func TestJobs_HandleListJobs_ReturnsOnlyCallersJobs(t *testing.T) {
 	t.Parallel()
 	userID := seedAPITestUser(t)
@@ -194,7 +252,7 @@ func TestJobs_HandleListJobs_ReturnsOnlyCallersJobs(t *testing.T) {
 func TestJobs_HandleApproveJob_TransitionsToQueued(t *testing.T) {
 	t.Parallel()
 	userID := seedAPITestUser(t)
-	job, err := queue.CreateJob(context.Background(), testPool, userID, "my job", false)
+	job, err := queue.CreateJob(context.Background(), testPool, userID, "my job", queue.JobOptions{})
 	if err != nil {
 		t.Fatalf("CreateJob: %v", err)
 	}
@@ -227,7 +285,7 @@ func TestJobs_HandleApproveJob_TransitionsToQueued(t *testing.T) {
 func TestJobs_HandleApproveJob_RejectsWrongState(t *testing.T) {
 	t.Parallel()
 	userID := seedAPITestUser(t)
-	job, err := queue.CreateJob(context.Background(), testPool, userID, "my job", false)
+	job, err := queue.CreateJob(context.Background(), testPool, userID, "my job", queue.JobOptions{})
 	if err != nil {
 		t.Fatalf("CreateJob: %v", err)
 	}
@@ -287,6 +345,176 @@ func TestJobs_HandleCancelJob_NotFoundForAnotherUsersJob(t *testing.T) {
 
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want 404", rec.Code)
+	}
+}
+
+// seedFailedJobWithFailedStep seeds a job that ran, had one step
+// fail, and landed in FAILED — the shape a retryable job has.
+func seedFailedJobWithFailedStep(t *testing.T, userID uuid.UUID) *queue.Job {
+	t.Helper()
+	ctx := context.Background()
+	job, err := queue.CreateQueuedJob(ctx, testPool, userID, "my job")
+	if err != nil {
+		t.Fatalf("CreateQueuedJob: %v", err)
+	}
+	if _, err := testPool.Exec(ctx, `UPDATE jobs SET status = 'RUNNING' WHERE id = $1`, job.ID); err != nil {
+		t.Fatalf("set job running: %v", err)
+	}
+	step, err := queue.EnsureStep(ctx, testPool, job.ID, 0, "title", "description")
+	if err != nil {
+		t.Fatalf("EnsureStep: %v", err)
+	}
+	if err := queue.FinishStep(ctx, testPool, step.ID, queue.StepFailed, "boom"); err != nil {
+		t.Fatalf("FinishStep: %v", err)
+	}
+	reason := "boom"
+	if err := queue.Transition(ctx, testPool, job.ID, queue.StatusRunning, queue.StatusFailed, queue.JobStatusFields{FailureReason: &reason}); err != nil {
+		t.Fatalf("transition to failed: %v", err)
+	}
+	job.Status = queue.StatusFailed
+	return job
+}
+
+func TestJobs_HandleRetryJob_TransitionsToQueued(t *testing.T) {
+	t.Parallel()
+	userID := seedAPITestUser(t)
+	job := seedFailedJobWithFailedStep(t, userID)
+
+	srv := newJobsTestServer(t, userID, &fakePublisher{})
+	req := authedRequest(http.MethodPost, "/v1/jobs/"+job.ID.String()+"/retry", "")
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204; body: %s", rec.Code, rec.Body.String())
+	}
+
+	got, err := queue.GetJob(context.Background(), testPool, job.ID)
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if got.Status != queue.StatusQueued {
+		t.Errorf("Status = %s, want QUEUED", got.Status)
+	}
+}
+
+func TestJobs_HandleRetryJob_RejectsWrongState(t *testing.T) {
+	t.Parallel()
+	userID := seedAPITestUser(t)
+	job, err := queue.CreateQueuedJob(context.Background(), testPool, userID, "my job") // QUEUED, not FAILED
+	if err != nil {
+		t.Fatalf("CreateQueuedJob: %v", err)
+	}
+
+	srv := newJobsTestServer(t, userID, &fakePublisher{})
+	req := authedRequest(http.MethodPost, "/v1/jobs/"+job.ID.String()+"/retry", "")
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Errorf("status = %d, want 409", rec.Code)
+	}
+}
+
+func TestJobs_HandleRetryJob_NotFoundForAnotherUsersJob(t *testing.T) {
+	t.Parallel()
+	owner := seedAPITestUser(t)
+	caller := seedAPITestUser(t)
+	job := seedFailedJobWithFailedStep(t, owner)
+
+	srv := newJobsTestServer(t, caller, &fakePublisher{})
+	req := authedRequest(http.MethodPost, "/v1/jobs/"+job.ID.String()+"/retry", "")
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", rec.Code)
+	}
+}
+
+func TestJobs_HandleDownloadArtifact_NotConfiguredReturns503(t *testing.T) {
+	t.Parallel()
+	userID := seedAPITestUser(t)
+	job, err := queue.CreateQueuedJob(context.Background(), testPool, userID, "my job")
+	if err != nil {
+		t.Fatalf("CreateQueuedJob: %v", err)
+	}
+
+	srv := newJobsTestServer(t, userID, &fakePublisher{}) // no Artifacts configured
+	req := authedRequest(http.MethodGet, "/v1/jobs/"+job.ID.String()+"/artifact", "")
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503", rec.Code)
+	}
+}
+
+func TestJobs_HandleDownloadArtifact_NoArtifactKeyReturns404(t *testing.T) {
+	t.Parallel()
+	userID := seedAPITestUser(t)
+	job, err := queue.CreateQueuedJob(context.Background(), testPool, userID, "my job")
+	if err != nil {
+		t.Fatalf("CreateQueuedJob: %v", err)
+	}
+
+	srv := newJobsTestServerWithArtifacts(t, userID, &fakePublisher{}, &fakeArtifactStore{url: "https://example.com/should-not-be-used"})
+	req := authedRequest(http.MethodGet, "/v1/jobs/"+job.ID.String()+"/artifact", "")
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404 — job has no uploaded artifact yet", rec.Code)
+	}
+}
+
+// TestJobs_HandleDownloadArtifact_RedirectsToPresignedURL proves the
+// endpoint matches PRD §11.2's documented contract exactly: "302 →
+// presigned download URL", not a proxied stream of the archive
+// through the control plane.
+func TestJobs_HandleDownloadArtifact_RedirectsToPresignedURL(t *testing.T) {
+	t.Parallel()
+	userID := seedAPITestUser(t)
+	job, err := queue.CreateQueuedJob(context.Background(), testPool, userID, "my job")
+	if err != nil {
+		t.Fatalf("CreateQueuedJob: %v", err)
+	}
+	if err := queue.SetJobArtifactKey(context.Background(), testPool, job.ID, "some-key"); err != nil {
+		t.Fatalf("SetJobArtifactKey: %v", err)
+	}
+
+	const wantURL = "https://minio.example.com/bucket/object?X-Amz-Signature=abc"
+	srv := newJobsTestServerWithArtifacts(t, userID, &fakePublisher{}, &fakeArtifactStore{url: wantURL})
+	req := authedRequest(http.MethodGet, "/v1/jobs/"+job.ID.String()+"/artifact", "")
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusFound {
+		t.Fatalf("status = %d, want 302", rec.Code)
+	}
+	if loc := rec.Header().Get("Location"); loc != wantURL {
+		t.Errorf("Location = %q, want %q", loc, wantURL)
+	}
+}
+
+func TestJobs_HandleDownloadArtifact_PresignErrorIsInternalError(t *testing.T) {
+	t.Parallel()
+	userID := seedAPITestUser(t)
+	job, err := queue.CreateQueuedJob(context.Background(), testPool, userID, "my job")
+	if err != nil {
+		t.Fatalf("CreateQueuedJob: %v", err)
+	}
+	if err := queue.SetJobArtifactKey(context.Background(), testPool, job.ID, "some-key"); err != nil {
+		t.Fatalf("SetJobArtifactKey: %v", err)
+	}
+
+	srv := newJobsTestServerWithArtifacts(t, userID, &fakePublisher{}, &fakeArtifactStore{err: errors.New("minio unreachable")})
+	req := authedRequest(http.MethodGet, "/v1/jobs/"+job.ID.String()+"/artifact", "")
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500", rec.Code)
 	}
 }
 

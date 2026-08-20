@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+
+	"github.com/google/uuid"
 )
 
 func trivialTool(name string) Tool {
@@ -12,7 +14,17 @@ func trivialTool(name string) Tool {
 		Description: "test tool",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"x":{"type":"string"}},"required":["x"]}`),
 		PolicyClass: PolicySafe,
-		Handler:     func(context.Context, string, json.RawMessage) (string, error) { return "ok", nil },
+		Handler:     func(context.Context, string, uuid.UUID, json.RawMessage) (string, error) { return "ok", nil },
+	}
+}
+
+func trivialPrivilegedTool(name string) Tool {
+	return Tool{
+		Name:        name,
+		Description: "test privileged tool",
+		InputSchema: json.RawMessage(`{"type":"object"}`),
+		PolicyClass: PolicyPrivileged,
+		Handler:     func(context.Context, string, uuid.UUID, json.RawMessage) (string, error) { return "ok", nil },
 	}
 }
 
