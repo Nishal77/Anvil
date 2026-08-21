@@ -8,6 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
+	"go.uber.org/goleak"
 )
 
 // integrationPool is shared across every test in this package that
@@ -39,19 +40,19 @@ func runTestMain(m *testing.M) int {
 		fmt.Fprintln(os.Stderr, "agent tests: start postgres container:", err)
 		return 1
 	}
-	defer func() { _ = container.Terminate(ctx) }()
 
 	connStr, err := container.ConnectionString(ctx, "sslmode=disable")
 	if err != nil {
+		_ = container.Terminate(ctx)
 		fmt.Fprintln(os.Stderr, "agent tests: get connection string:", err)
 		return 1
 	}
 	pool, err := pgxpool.New(ctx, connStr)
 	if err != nil {
+		_ = container.Terminate(ctx)
 		fmt.Fprintln(os.Stderr, "agent tests: connect:", err)
 		return 1
 	}
-	defer pool.Close()
 
 	for _, path := range []string{
 		"../../migrations/001_users.up.sql",
@@ -64,17 +65,44 @@ func runTestMain(m *testing.M) int {
 	} {
 		sql, err := os.ReadFile(path)
 		if err != nil {
+			pool.Close()
+			_ = container.Terminate(ctx)
 			fmt.Fprintln(os.Stderr, "agent tests: read migration:", err)
 			return 1
 		}
 		if _, err := pool.Exec(ctx, string(sql)); err != nil {
+			pool.Close()
+			_ = container.Terminate(ctx)
 			fmt.Fprintln(os.Stderr, "agent tests: apply migration:", err)
 			return 1
 		}
 	}
 
 	integrationPool = pool
-	return m.Run()
+	code := m.Run()
+
+	// Close explicitly, before the leak check — not via defer. pgxpool
+	// runs its own background health-check goroutine and testcontainers
+	// its own reaper-connection goroutine for as long as the pool/container
+	// are open; checking for leaks first and closing after (what defer
+	// would do) flags those as "leaked" when they are simply still alive,
+	// not abandoned by this package's code. Mirrors internal/queue/main_test.go.
+	pool.Close()
+	_ = container.Terminate(ctx)
+
+	if code == 0 {
+		// go.opencensus.io starts a permanent, process-lifetime stats
+		// worker goroutine on package init — pulled in transitively by
+		// the Docker/testcontainers client this package's tests link
+		// against. It is a fixed part of that dependency, not something
+		// this package's own code leaks, so it is the one function
+		// goleak is told to disregard.
+		if err := goleak.Find(goleak.IgnoreTopFunction("go.opencensus.io/stats/view.(*worker).start")); err != nil {
+			fmt.Fprintln(os.Stderr, "goroutine leak:", err)
+			return 1
+		}
+	}
+	return code
 }
 
 func requireIntegrationPool(t *testing.T) *pgxpool.Pool {
