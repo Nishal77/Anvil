@@ -1,0 +1,35 @@
+# Alertmanager config (PRD §17.4: "Alertmanager → email"). Routes by
+# the `severity` label every rule in alerts.yml sets — page and warn
+# both email immediately (this is a single-operator project, PRD §18.1;
+# there is no on-call rotation to page into a different channel), info
+# just needs to be visible on a dashboard, not delivered.
+#
+# SMTP credentials are read from environment variables at load time
+# (the ${VAR} syntax below), never written into this file — the same
+# rule CLAUDE.md I-3 applies to every other secret in this codebase.
+#
+# Load with: alertmanager --config.file ops/prometheus/alertmanager.yml
+
+global:
+  smtp_smarthost: "${ANVIL_SMTP_HOST}:${ANVIL_SMTP_PORT}"
+  smtp_from: "${ANVIL_ALERT_FROM_EMAIL}"
+  smtp_auth_username: "${ANVIL_SMTP_USERNAME}"
+  smtp_auth_password: "${ANVIL_SMTP_PASSWORD}"
+
+route:
+  receiver: email
+  group_by: [alertname]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  routes:
+    - match:
+        severity: info
+      receiver: email
+      repeat_interval: 24h # info alerts are dashboard-visible; no need to re-notify hourly
+
+receivers:
+  - name: email
+    email_configs:
+      - to: "${ANVIL_ALERT_TO_EMAIL}"
+        send_resolved: true

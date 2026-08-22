@@ -1,0 +1,67 @@
+{
+  "title": "Anvil / Service Health",
+  "uid": "anvil-service-health",
+  "tags": ["anvil"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "15s",
+  "time": { "from": "now-6h", "to": "now" },
+  "panels": [
+    {
+      "title": "Request rate by status",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "expr": "sum by (status) (rate(anvil_http_requests_total[5m]))",
+          "legendFormat": "{{status}}"
+        }
+      ]
+    },
+    {
+      "title": "Error rate (5xx / total)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        {
+          "expr": "sum(rate(anvil_http_requests_total{status=~\"5..\"}[5m])) / sum(rate(anvil_http_requests_total[5m]))",
+          "legendFormat": "error ratio"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percentunit" }, "overrides": [] }
+    },
+    {
+      "title": "Request duration (p50/p95/p99) by route",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum by (le, route) (rate(anvil_http_request_duration_seconds_bucket[5m])))", "legendFormat": "p50 {{route}}" },
+        { "expr": "histogram_quantile(0.95, sum by (le, route) (rate(anvil_http_request_duration_seconds_bucket[5m])))", "legendFormat": "p95 {{route}}" },
+        { "expr": "histogram_quantile(0.99, sum by (le, route) (rate(anvil_http_request_duration_seconds_bucket[5m])))", "legendFormat": "p99 {{route}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] }
+    },
+    {
+      "title": "Queue depth",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "targets": [
+        { "expr": "anvil_queue_depth", "legendFormat": "eligible QUEUED jobs" },
+        { "expr": "anvil_queue_oldest_pending_seconds", "legendFormat": "oldest pending (s)" }
+      ]
+    },
+    {
+      "title": "Worker utilization",
+      "type": "gauge",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "targets": [{ "expr": "anvil_worker_utilization_ratio" }],
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 }, "overrides": [] }
+    },
+    {
+      "title": "Jobs active",
+      "type": "stat",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "targets": [{ "expr": "anvil_jobs_active" }]
+    }
+  ]
+}

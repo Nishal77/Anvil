@@ -11,10 +11,13 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/anvil-dev/anvil/internal/llm"
 	"github.com/anvil-dev/anvil/internal/queue"
 	"github.com/anvil-dev/anvil/internal/storage"
+	"github.com/anvil-dev/anvil/internal/telemetry"
 )
 
 // sandboxManager is everything Executor itself needs beyond the
@@ -364,6 +367,23 @@ func (e *Executor) runAllSteps(ctx context.Context, job *queue.Job, sandboxID st
 }
 
 func (e *Executor) runOneStep(ctx context.Context, job *queue.Job, steps []queue.Step, step queue.Step, sandboxID string) error {
+	ctx, span := telemetry.Tracer("agent").Start(ctx, "step.execute", trace.WithAttributes(
+		telemetry.AttrJobID.String(job.ID.String()),
+		telemetry.AttrStepIdx.Int(step.Idx),
+	))
+	defer span.End()
+
+	if err := e.runOneStepBody(ctx, job, steps, step, sandboxID); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+	return nil
+}
+
+// runOneStepBody is runOneStep's actual logic, split out so the span
+// wrapper above stays a thin, uniform shape.
+func (e *Executor) runOneStepBody(ctx context.Context, job *queue.Job, steps []queue.Step, step queue.Step, sandboxID string) error {
 	if err := queue.StartStep(ctx, e.pool, step.ID); err != nil {
 		return fmt.Errorf("agent: start step %d: %w", step.Idx, err)
 	}

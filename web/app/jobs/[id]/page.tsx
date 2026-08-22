@@ -12,6 +12,7 @@ import {
   cancelJob,
   artifactURL,
   usdFromMicros,
+  traceExploreURL,
   type Job,
 } from "@/lib/api";
 
@@ -136,6 +137,15 @@ export default function JobPage() {
       {job?.preview_url && (
         <a href={job.preview_url} target="_blank" rel="noreferrer" style={{ marginLeft: "0.5rem" }}>
           Open preview
+        </a>
+      )}
+      {/* EG-3: every span from this job's HTTP request through container
+          exit, one click away — see internal/telemetry.ContextWithTraceID's
+          doc comment for how job.trace_id stays one trace across the async
+          queue boundary. */}
+      {traceExploreURL(job?.trace_id) && (
+        <a href={traceExploreURL(job?.trace_id)} target="_blank" rel="noreferrer" style={{ marginLeft: "0.5rem" }}>
+          View trace
         </a>
       )}
 

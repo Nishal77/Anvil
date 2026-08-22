@@ -24,6 +24,15 @@ var (
 		Help: "Policy engine decisions, by tool and decision.",
 	}, []string{"tool", "decision"})
 
+	// policyDenialsTotal is PRD §17.2's anvil_policy_denials_total —
+	// narrower than policyDecisionsTotal above (Deny outcomes only) but
+	// labeled by which of the 7 rules denied, which decision alone
+	// doesn't say.
+	policyDenialsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "anvil_policy_denials_total",
+		Help: "Policy engine denials, by tool and the rule that denied.",
+	}, []string{"tool", "rule"})
+
 	stepTurnsTotal = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "agent_step_turns_total",
 		Help: "Executor turns run across all steps.",

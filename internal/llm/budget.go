@@ -106,6 +106,11 @@ func (g *GlobalCap) Check(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("llm: check global cap: %w", err)
 	}
+	remaining := g.capUSDMicros - spent
+	if remaining < 0 {
+		remaining = 0
+	}
+	llmBudgetRemainingUSD.Set(float64(remaining) / 1_000_000)
 	if spent >= g.capUSDMicros {
 		return ErrGlobalCapExceeded
 	}

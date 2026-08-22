@@ -73,13 +73,16 @@ func sweep(ctx context.Context, pool *pgxpool.Pool, clk Clock) (reclaimed, deadL
 		switch outcome {
 		case sweepReclaimed:
 			reclaimed++
+			leaseReclaimsTotal.WithLabelValues("reclaimed").Inc()
 		case sweepCancelled:
 			cancelled++
+			leaseReclaimsTotal.WithLabelValues("cancelled").Inc()
 			if sandboxID != "" {
 				cancelledSandboxIDs = append(cancelledSandboxIDs, sandboxID)
 			}
 		case sweepDeadLettered:
 			deadLettered++
+			leaseReclaimsTotal.WithLabelValues("dead_lettered").Inc()
 		}
 	}
 }

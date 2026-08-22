@@ -10,6 +10,8 @@ import (
 	"time"
 
 	dockerclient "github.com/moby/moby/client"
+
+	"github.com/anvil-dev/anvil/internal/telemetry"
 )
 
 const shutdownGracePeriod = 30 * time.Second
@@ -108,7 +110,14 @@ func New(cfg Config) (*Server, error) {
 	mux.HandleFunc("POST /previews/{job_id}", s.handleBuildPreview)
 	mux.HandleFunc("DELETE /previews/{job_id}", s.handleDestroyPreview)
 
-	s.httpServer = &http.Server{Addr: cfg.Addr, Handler: mux}
+	// telemetry.ExtractTraceContext continues the traceparent header
+	// internal/sandbox.Client's otelhttp-wrapped transport sends,
+	// carrying the control plane's trace across the process boundary
+	// instead of starting a disconnected one here (PRD §17.1). Not
+	// telemetry.WrapHandler: handleExec streams its response, and
+	// otelhttp.NewHandler's ResponseWriter wrapping breaks that
+	// (see ExtractTraceContext's own doc comment).
+	s.httpServer = &http.Server{Addr: cfg.Addr, Handler: telemetry.ExtractTraceContext(mux)}
 	return s, nil
 }
 

@@ -6,6 +6,8 @@ import (
 	"net/http"
 
 	"github.com/google/uuid"
+
+	"github.com/anvil-dev/anvil/internal/telemetry"
 )
 
 // cors lets the web frontend, served from a different origin in dev
@@ -46,12 +48,18 @@ func traceIDFromContext(ctx context.Context) string {
 	return id
 }
 
-// traceID assigns a trace ID to every request, honoring an incoming
-// X-Trace-Id header if present, and echoes it back on the response
-// (FR-004).
+// traceID assigns a trace ID to every request and echoes it back on the
+// response (FR-004). It prefers the OpenTelemetry trace ID of the span
+// telemetry.WrapHandler already started for this request — the same
+// value PRD §17.1 requires stored on jobs.trace_id, so a job's trace_id
+// and its Grafana trace are the same lookup, not two independently
+// generated IDs that happen to usually agree. Falling back to a fresh
+// UUID only when no span is active (tracing disabled, or a caller —
+// including this package's own tests — invoking a handler outside the
+// full middleware chain) keeps X-Trace-Id populated either way.
 func traceID(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		id := r.Header.Get("X-Trace-Id")
+		id := telemetry.TraceIDFromContext(r.Context())
 		if id == "" {
 			id = uuid.NewString()
 		}

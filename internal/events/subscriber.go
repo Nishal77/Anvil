@@ -48,6 +48,7 @@ func (s *subscriber) send(ev storage.Event) {
 		s.dropFrom.CompareAndSwap(0, ev.Seq)
 		s.dropTo.Store(ev.Seq)
 		s.dropped.Add(1)
+		sseSubscriberDropsTotal.Inc()
 	}
 }
 

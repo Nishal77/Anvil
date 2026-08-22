@@ -9,7 +9,12 @@ import (
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/anvil-dev/anvil/internal/sandbox"
+	"github.com/anvil-dev/anvil/internal/telemetry"
 )
 
 // handleCreate — POST /sandboxes.
@@ -76,13 +81,34 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 		flusher.Flush()
 	}
 
-	exitCode, err := runInGroup(r.Context(), s.docker, sandboxID, req.Command, timeout, onChunk)
+	exitCode, err := s.runContainerSpan(r.Context(), sandboxID, req.Command, timeout, onChunk)
 	final := sandbox.ExecChunk{Final: true, ExitCode: exitCode, Timestamp: time.Now()}
 	if err != nil && !errors.Is(err, sandbox.ErrCommandTimeout) {
 		s.log.ErrorContext(r.Context(), "exec failed", slog.String("sandbox_id", sandboxID), slog.Any("err", err))
 	}
 	_ = enc.Encode(final)
 	flusher.Flush()
+}
+
+// runContainerSpan wraps runInGroup in the "container.run" span PRD
+// §17.1's tree nests under sandbox.exec — the leaf that actually runs a
+// command inside the container, ending exactly when the process exits.
+// Split out of handleExec so the streaming response-writing logic there
+// stays untouched by (and untouched *by*) span bookkeeping — no part of
+// this function or what it calls ever holds w or a Flusher, unlike
+// telemetry.WrapHandler, which this handler deliberately doesn't use.
+func (s *Server) runContainerSpan(ctx context.Context, sandboxID, command string, timeout time.Duration, onChunk func(string, []byte)) (int, error) {
+	ctx, span := telemetry.Tracer("runner").Start(ctx, "container.run", trace.WithAttributes(
+		attribute.String("anvil.command", command),
+	))
+	defer span.End()
+
+	exitCode, err := runInGroup(ctx, s.docker, sandboxID, command, timeout, onChunk)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+	}
+	return exitCode, err
 }
 
 // handleWriteFile — POST /sandboxes/{id}/write. Writes req.Data to

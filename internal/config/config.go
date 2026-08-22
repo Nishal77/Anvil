@@ -76,6 +76,11 @@ type Config struct {
 	// not the whole control plane at startup.
 	PreviewDomain  string
 	CaddyAdminAddr string
+	// OTelCollectorEndpoint is the OTel Collector's OTLP/gRPC address
+	// (PRD §17.1). Empty disables tracing entirely — see
+	// telemetry.NewTracerProvider's own doc comment for why that is a
+	// safe default rather than a startup failure.
+	OTelCollectorEndpoint string
 }
 
 // LogValue redacts JWTSigningKey and every API key so a careless
@@ -102,6 +107,7 @@ func (c Config) LogValue() slog.Value {
 		slog.String("s3_bucket", c.S3Bucket),
 		slog.Bool("preview_deploy_configured", c.PreviewDomain != ""),
 		slog.String("preview_domain", c.PreviewDomain),
+		slog.Bool("tracing_enabled", c.OTelCollectorEndpoint != ""),
 	)
 }
 
@@ -109,33 +115,34 @@ func (c Config) LogValue() slog.Value {
 // defaults for optional fields.
 func Load() (Config, error) {
 	cfg := Config{
-		HTTPAddr:            envOr("ANVIL_HTTP_ADDR", defaultHTTPAddr),
-		DatabaseURL:         os.Getenv("DATABASE_URL"),
-		DatabaseMaxConns:    defaultDatabaseMaxConns,
-		RedisAddr:           envOr("REDIS_URL", ""),
-		RunnerAddr:          envOr("ANVIL_RUNNER_URL", defaultRunnerAddr),
-		JWTSigningKey:       []byte(os.Getenv("ANVIL_JWT_SECRET")),
-		AccessTokenTTL:      defaultAccessTokenTTL,
-		RefreshTokenTTL:     defaultRefreshTokenTTL,
-		SecretEncryptionKey: []byte(os.Getenv("ANVIL_SECRET_ENCRYPTION_KEY")),
-		GitHubClientID:      os.Getenv("ANVIL_GITHUB_CLIENT_ID"),
-		GitHubClientSecret:  os.Getenv("ANVIL_GITHUB_CLIENT_SECRET"),
-		GitHubRedirectURL:   os.Getenv("ANVIL_GITHUB_REDIRECT_URL"),
-		GitHubWebURL:        os.Getenv("ANVIL_WEB_URL"),
-		GeminiAPIKey:        os.Getenv("ANVIL_GEMINI_API_KEY"),
-		GeminiModel:         envOr("ANVIL_GEMINI_MODEL", defaultGeminiModel),
-		AnthropicAPIKey:     os.Getenv("ANVIL_ANTHROPIC_API_KEY"),
-		OpenAIAPIKey:        os.Getenv("ANVIL_OPENAI_API_KEY"),
-		OpenAIModel:         envOr("ANVIL_OPENAI_MODEL", defaultOpenAIModel),
-		MonthlyUSDCapMicros: defaultMonthlyUSDCap * usdMicrosPerUSD,
-		MaxSteps:            defaultMaxSteps,
-		S3Endpoint:          os.Getenv("ANVIL_S3_ENDPOINT"),
-		S3Bucket:            envOr("ANVIL_S3_BUCKET", "anvil-artifacts"),
-		S3AccessKey:         os.Getenv("ANVIL_S3_ACCESS_KEY"),
-		S3SecretKey:         os.Getenv("ANVIL_S3_SECRET_KEY"),
-		S3UseSSL:            os.Getenv("ANVIL_S3_USE_SSL") == "true",
-		PreviewDomain:       os.Getenv("ANVIL_PREVIEW_DOMAIN"),
-		CaddyAdminAddr:      envOr("ANVIL_CADDY_ADMIN_ADDR", defaultCaddyAdminAddr),
+		HTTPAddr:              envOr("ANVIL_HTTP_ADDR", defaultHTTPAddr),
+		DatabaseURL:           os.Getenv("DATABASE_URL"),
+		DatabaseMaxConns:      defaultDatabaseMaxConns,
+		RedisAddr:             envOr("REDIS_URL", ""),
+		RunnerAddr:            envOr("ANVIL_RUNNER_URL", defaultRunnerAddr),
+		JWTSigningKey:         []byte(os.Getenv("ANVIL_JWT_SECRET")),
+		AccessTokenTTL:        defaultAccessTokenTTL,
+		RefreshTokenTTL:       defaultRefreshTokenTTL,
+		SecretEncryptionKey:   []byte(os.Getenv("ANVIL_SECRET_ENCRYPTION_KEY")),
+		GitHubClientID:        os.Getenv("ANVIL_GITHUB_CLIENT_ID"),
+		GitHubClientSecret:    os.Getenv("ANVIL_GITHUB_CLIENT_SECRET"),
+		GitHubRedirectURL:     os.Getenv("ANVIL_GITHUB_REDIRECT_URL"),
+		GitHubWebURL:          os.Getenv("ANVIL_WEB_URL"),
+		GeminiAPIKey:          os.Getenv("ANVIL_GEMINI_API_KEY"),
+		GeminiModel:           envOr("ANVIL_GEMINI_MODEL", defaultGeminiModel),
+		AnthropicAPIKey:       os.Getenv("ANVIL_ANTHROPIC_API_KEY"),
+		OpenAIAPIKey:          os.Getenv("ANVIL_OPENAI_API_KEY"),
+		OpenAIModel:           envOr("ANVIL_OPENAI_MODEL", defaultOpenAIModel),
+		MonthlyUSDCapMicros:   defaultMonthlyUSDCap * usdMicrosPerUSD,
+		MaxSteps:              defaultMaxSteps,
+		S3Endpoint:            os.Getenv("ANVIL_S3_ENDPOINT"),
+		S3Bucket:              envOr("ANVIL_S3_BUCKET", "anvil-artifacts"),
+		S3AccessKey:           os.Getenv("ANVIL_S3_ACCESS_KEY"),
+		S3SecretKey:           os.Getenv("ANVIL_S3_SECRET_KEY"),
+		S3UseSSL:              os.Getenv("ANVIL_S3_USE_SSL") == "true",
+		PreviewDomain:         os.Getenv("ANVIL_PREVIEW_DOMAIN"),
+		CaddyAdminAddr:        envOr("ANVIL_CADDY_ADMIN_ADDR", defaultCaddyAdminAddr),
+		OTelCollectorEndpoint: os.Getenv("ANVIL_OTEL_COLLECTOR_ENDPOINT"),
 	}
 
 	if v := os.Getenv("ANVIL_MAX_STEPS"); v != "" {

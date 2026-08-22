@@ -1,0 +1,40 @@
+{
+  "title": "Anvil / Streaming",
+  "uid": "anvil-streaming",
+  "tags": ["anvil"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "15s",
+  "time": { "from": "now-6h", "to": "now" },
+  "panels": [
+    {
+      "title": "Open SSE subscribers",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [{ "expr": "anvil_sse_subscribers" }]
+    },
+    {
+      "title": "Delivery latency (p50/p95/p99)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum by (le) (rate(anvil_sse_delivery_latency_seconds_bucket[5m])))", "legendFormat": "p50" },
+        { "expr": "histogram_quantile(0.95, sum by (le) (rate(anvil_sse_delivery_latency_seconds_bucket[5m])))", "legendFormat": "p95" },
+        { "expr": "histogram_quantile(0.99, sum by (le) (rate(anvil_sse_delivery_latency_seconds_bucket[5m])))", "legendFormat": "p99" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] }
+    },
+    {
+      "title": "Events published by type",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "targets": [{ "expr": "sum by (type) (rate(anvil_sse_events_published_total[5m]))", "legendFormat": "{{type}}" }]
+    },
+    {
+      "title": "Subscriber drop rate (FR-054 stream_gap)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "targets": [{ "expr": "rate(anvil_sse_subscriber_drops_total[5m])" }]
+    }
+  ]
+}

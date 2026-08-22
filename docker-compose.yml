@@ -49,6 +49,93 @@ services:
     volumes:
       - anvil-minio:/data
 
+  # --- Observability (PRD §17, §18.1) ---------------------------------
+  # anvil-api and anvil-runner are not services here, for the same
+  # host-networking reason Caddy isn't (see this file's own header
+  # comment): they run as systemd units directly on the host
+  # (ops/systemd/) and export OTLP traces / serve /metrics from there.
+  # extra_hosts below is what lets every container in this stack reach
+  # them at host.docker.internal.
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.112.0
+    command: ["--config=/etc/otel-collector/config.yaml"]
+    volumes:
+      - ./ops/otel-collector/config.yaml:/etc/otel-collector/config.yaml:ro
+    ports:
+      - "4317:4317" # OTLP/gRPC — internal/telemetry.NewTracerProvider's CollectorEndpoint
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - tempo
+
+  tempo:
+    image: grafana/tempo:2.6.1
+    command: ["-config.file=/etc/tempo/tempo.yaml"]
+    volumes:
+      - ./ops/tempo/tempo.yaml:/etc/tempo/tempo.yaml:ro
+      - anvil-tempo:/var/tempo
+
+  prometheus:
+    image: prom/prometheus:v3.0.1
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+    volumes:
+      - ./ops/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./ops/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - anvil-prometheus:/prometheus
+    ports:
+      - "9090:9090"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - alertmanager
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    # Alertmanager's own config format has no ${VAR} substitution
+    # (unlike Prometheus's, which supports some) — render-alertmanager-
+    # config.sh fills in alertmanager.yml's ${ANVIL_SMTP_HOST} etc.
+    # placeholders from this container's own environment (env_file
+    # below) before starting Alertmanager, the standard way to keep
+    # credentials out of a file this repo tracks in git.
+    entrypoint: ["sh", "/etc/alertmanager/render-alertmanager-config.sh"]
+    env_file:
+      - .env # ANVIL_SMTP_HOST / _PORT, ANVIL_ALERT_FROM_EMAIL, ANVIL_SMTP_USERNAME / _PASSWORD, ANVIL_ALERT_TO_EMAIL
+    volumes:
+      - ./ops/prometheus/alertmanager.yml:/etc/alertmanager/alertmanager.yml.template:ro
+      - ./ops/prometheus/render-alertmanager-config.sh:/etc/alertmanager/render-alertmanager-config.sh:ro
+
+  grafana:
+    image: grafana/grafana:11.3.1
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      # Read by ops/grafana/provisioning/datasources/datasources.yml's
+      # $__env{...} substitution for the Cost dashboard's "spend by
+      # user" panel (internal/llm/metrics.go's cost metric is
+      # model-labeled only, not per-user — see that panel's own doc
+      # comment in ops/grafana/dashboards/cost.json). Not GF_DATABASE_*:
+      # those are Grafana's reserved names for its own internal store.
+      ANVIL_DATABASE_HOST: "${ANVIL_DATABASE_HOST:-host.docker.internal}"
+      ANVIL_DATABASE_USER: "${ANVIL_DATABASE_USER:-anvil}"
+      ANVIL_DATABASE_PASSWORD: "${ANVIL_DATABASE_PASSWORD:-}"
+    ports:
+      - "3001:3000" # 3000 is Next.js's own dev port (web/) — avoid colliding
+    volumes:
+      # One mount, not two: ops/grafana/provisioning/dashboards/files/
+      # already contains the dashboard JSON (dashboards.yml's own
+      # `path:`), nested inside this same tree — a second bind mount
+      # for it would create a mountpoint *inside* this read-only mount,
+      # which the container can't do (read-only filesystem error).
+      - ./ops/grafana/provisioning:/etc/grafana/provisioning:ro
+      - anvil-grafana:/var/lib/grafana
+    depends_on:
+      - prometheus
+      - tempo
+
 volumes:
   anvil-postgres:
   anvil-minio:
+  anvil-tempo:
+  anvil-prometheus:
+  anvil-grafana:

@@ -1,0 +1,48 @@
+{
+  "title": "Anvil / Sandbox",
+  "uid": "anvil-sandbox",
+  "tags": ["anvil"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "15s",
+  "time": { "from": "now-6h", "to": "now" },
+  "panels": [
+    {
+      "title": "Active sandboxes",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [{ "expr": "anvil_sandbox_active" }]
+    },
+    {
+      "title": "Create / exec duration (p95)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        { "expr": "histogram_quantile(0.95, sum by (le) (rate(anvil_sandbox_create_duration_seconds_bucket[5m])))", "legendFormat": "create p95" },
+        { "expr": "histogram_quantile(0.95, sum by (le) (rate(anvil_sandbox_exec_duration_seconds_bucket[5m])))", "legendFormat": "exec p95" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] }
+    },
+    {
+      "title": "Timeout kills",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "targets": [{ "expr": "rate(anvil_sandbox_timeout_kills_total[15m])" }]
+    },
+    {
+      "title": "Policy denials by tool and rule",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "targets": [{ "expr": "sum by (tool, rule) (rate(anvil_policy_denials_total[15m]))", "legendFormat": "{{tool}} / {{rule}}" }]
+    },
+    {
+      "title": "OOM kills & egress denials",
+      "type": "text",
+      "gridPos": { "h": 4, "w": 24, "x": 0, "y": 16 },
+      "options": {
+        "mode": "markdown",
+        "content": "**Not wired yet.** PRD §17.2 documents `anvil_sandbox_oom_kills_total` and `anvil_egress_denials_total`, but nothing in this codebase currently detects an OOM kill or denies egress — the allowlist proxy that would emit the latter is BUILD-PLAN Week 11, task 11.3. Add both panels back (querying those exact metric names — see internal/sandbox/metrics.go's own doc comment) once that work lands, instead of shipping a panel that's always empty."
+      }
+    }
+  ]
+}

@@ -33,6 +33,43 @@ export interface Job {
   token_budget: number;
   tokens_used: number;
   cost_usd_micros: number;
+  // trace_id is absent for a job created with tracing disabled
+  // (ANVIL_OTEL_COLLECTOR_ENDPOINT unset — see internal/telemetry's own
+  // doc comment). Used to deep-link to this job's Grafana trace (EG-3,
+  // PRD §17.1) — see traceExploreURL below.
+  trace_id?: string;
+}
+
+// grafanaBaseURL is where this deployment's Grafana lives — unset
+// disables the trace-ID deep link entirely rather than rendering a
+// dead link, the same "optional, not a hard failure" pattern
+// internal/config.Config uses for every other optional integration
+// (S3, preview deploy, ...). Read at build/runtime via Next.js's
+// standard NEXT_PUBLIC_ prefix, since this value is used in
+// client-rendered components.
+const grafanaBaseURL = process.env.NEXT_PUBLIC_GRAFANA_URL;
+
+// traceExploreURL returns a link straight into Grafana's Tempo Explore
+// view for traceID, or undefined if either traceID is empty (tracing
+// was disabled when the job was created) or this deployment has no
+// Grafana configured. The query param shape matches Grafana's Explore
+// URL schema for a single-query, single-panel trace lookup against the
+// datasource named "Tempo" (ops/grafana/provisioning/datasources/
+// datasources.yml's fixed name for it).
+export function traceExploreURL(traceID: string | undefined): string | undefined {
+  if (!traceID || !grafanaBaseURL) {
+    return undefined;
+  }
+  const query = {
+    datasource: "Tempo",
+    queries: [{ query: traceID, queryType: "traceql" }],
+  };
+  const params = new URLSearchParams({
+    schemaVersion: "1",
+    panes: JSON.stringify({ trace: query }),
+    orgId: "1",
+  });
+  return `${grafanaBaseURL}/explore?${params.toString()}`;
 }
 
 class APIError extends Error {

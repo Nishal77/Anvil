@@ -13,6 +13,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/anvil-dev/anvil/internal/auth"
+	"github.com/anvil-dev/anvil/internal/telemetry"
 )
 
 const shutdownGracePeriod = 30 * time.Second
@@ -129,7 +130,12 @@ func New(cfg Config) (*Server, error) {
 	mux.HandleFunc("GET /readyz", s.handleReadyz)
 	mux.Handle("GET /metrics", promhttp.Handler())
 
-	handler := cors(traceID(recoverPanic(cfg.Logger)(mux)))
+	// recordMetrics must sit directly around mux — see its own doc
+	// comment on why. telemetry.WrapHandler must sit outside traceID: it
+	// starts the span traceID then reads the trace ID from (PRD §17.1's
+	// "http.POST /v1/jobs" span is the root of every job's whole trace
+	// tree).
+	handler := cors(telemetry.WrapHandler(traceID(recoverPanic(cfg.Logger)(recordMetrics(mux))), "http.server"))
 
 	s.httpServer = &http.Server{
 		Addr:    cfg.Addr,

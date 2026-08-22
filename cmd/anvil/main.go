@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/google/uuid"
@@ -29,6 +30,11 @@ import (
 	"github.com/anvil-dev/anvil/internal/telemetry"
 	"github.com/anvil-dev/anvil/internal/version"
 )
+
+// shutdownGracePeriod bounds the final trace flush on exit — long enough
+// for one batch export to the Collector, short enough that a wedged
+// Collector connection can't hang process shutdown indefinitely.
+const shutdownGracePeriod = 5 * time.Second
 
 func main() {
 	showVersion := flag.Bool("version", false, "print version and exit")
@@ -56,6 +62,25 @@ func run() error {
 		return fmt.Errorf("load config: %w", err)
 	}
 	log := telemetry.NewLogger(os.Stdout, "api")
+
+	shutdownTracing, err := telemetry.NewTracerProvider(ctx, telemetry.TracerConfig{
+		ServiceName:       "anvil-api",
+		CollectorEndpoint: cfg.OTelCollectorEndpoint,
+	})
+	if err != nil {
+		return fmt.Errorf("construct tracer provider: %w", err)
+	}
+	// Backgrounded, not ctx: ctx is already cancelled by the time run()
+	// reaches this defer (that cancellation is what unblocked g.Wait()
+	// below), and a cancelled context would make the final flush a no-op
+	// right when there's the most spans buffered to lose.
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownGracePeriod)
+		defer cancel()
+		if err := shutdownTracing(shutdownCtx); err != nil {
+			log.Error("shut down tracer provider", slog.Any("err", err))
+		}
+	}()
 
 	cp, err := wireControlPlane(ctx, cfg, log)
 	if err != nil {

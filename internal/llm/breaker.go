@@ -105,6 +105,15 @@ func (b *breaker) recordFailure() {
 	}
 }
 
+// isOpen reports whether the breaker is currently rejecting calls
+// (PRD §17.2's anvil_llm_circuit_state: half-open, which is actively
+// letting a trial call through, reads as closed, not open).
+func (b *breaker) isOpen() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.state == breakerOpen
+}
+
 // open must be called with mu held.
 func (b *breaker) open() {
 	b.state = breakerOpen

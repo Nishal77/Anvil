@@ -9,9 +9,11 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/codes"
 
 	"github.com/anvil-dev/anvil/internal/queue"
 	"github.com/anvil-dev/anvil/internal/storage"
+	"github.com/anvil-dev/anvil/internal/telemetry"
 )
 
 // eventPublisher is the subset of events.Publisher the jobs handlers need.
@@ -98,6 +100,10 @@ type jobResponse struct {
 	TokenBudget   int64 `json:"token_budget"`
 	TokensUsed    int64 `json:"tokens_used"`
 	CostUSDMicros int64 `json:"cost_usd_micros"`
+	// TraceID is empty for a job created with tracing disabled. The
+	// frontend uses it to link straight to this job's Grafana trace
+	// (EG-3) instead of asking the user to hunt for it by timestamp.
+	TraceID string `json:"trace_id,omitempty"`
 }
 
 func toJobResponse(j *queue.Job, withEventsURL bool) jobResponse {
@@ -106,6 +112,7 @@ func toJobResponse(j *queue.Job, withEventsURL bool) jobResponse {
 		FailureReason: j.FailureReason, PlanSummary: j.PlanSummary, PreviewURL: j.PreviewURL,
 		HasArtifact: j.ArtifactKey != "",
 		TokenBudget: j.TokenBudget, TokensUsed: j.TokensUsed, CostUSDMicros: j.CostUSDMicros,
+		TraceID: j.TraceID,
 	}
 	if withEventsURL {
 		resp.EventsURL = "/v1/jobs/" + j.ID.String() + "/events"
@@ -127,11 +134,7 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	job, err := queue.CreateJob(r.Context(), s.pool, authenticatedUserID(r.Context()), req.Prompt, queue.JobOptions{
-		AutoApprove: req.Options.AutoApprove,
-		CreateRepo:  req.Options.CreateRepo,
-		Deploy:      req.Options.Deploy,
-	})
+	job, err := s.createJobSpan(r.Context(), req)
 	if err != nil {
 		s.writeInternalError(w, r, err)
 		return
@@ -281,6 +284,31 @@ func (s *Server) handleDownloadArtifact(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	http.Redirect(w, r, url, http.StatusFound)
+}
+
+// createJobSpan wraps queue.CreateJob in the "job.create" span PRD
+// §17.1's tree shows as the direct child of the request's own
+// http.POST span — split out of handleCreateJob purely to keep that
+// function's branching under CLAUDE.md's cyclomatic-complexity limit.
+func (s *Server) createJobSpan(ctx context.Context, req createJobRequest) (*queue.Job, error) {
+	ctx, span := telemetry.Tracer("api").Start(ctx, "job.create")
+	defer span.End()
+
+	job, err := queue.CreateJob(ctx, s.pool, authenticatedUserID(ctx), req.Prompt, queue.JobOptions{
+		AutoApprove: req.Options.AutoApprove,
+		CreateRepo:  req.Options.CreateRepo,
+		Deploy:      req.Options.Deploy,
+	})
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
+	}
+	span.SetAttributes(
+		telemetry.AttrJobID.String(job.ID.String()),
+		telemetry.AttrUserID.String(job.UserID.String()),
+	)
+	return job, nil
 }
 
 // loadOwnedJob reads the job named by {id} and 404s if it doesn't

@@ -15,6 +15,9 @@ import (
 	"github.com/anvil-dev/anvil/internal/telemetry"
 )
 
+// shutdownTracingTimeout bounds the final trace flush on exit.
+const shutdownTracingTimeout = 5 * time.Second
+
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -27,6 +30,21 @@ func run() error {
 	defer stop()
 
 	log := telemetry.NewLogger(os.Stdout, "runner")
+
+	shutdownTracing, err := telemetry.NewTracerProvider(ctx, telemetry.TracerConfig{
+		ServiceName:       "anvil-runner",
+		CollectorEndpoint: os.Getenv("ANVIL_OTEL_COLLECTOR_ENDPOINT"),
+	})
+	if err != nil {
+		return fmt.Errorf("run: construct tracer provider: %w", err)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTracingTimeout)
+		defer cancel()
+		if err := shutdownTracing(shutdownCtx); err != nil {
+			log.Error("shut down tracer provider", slog.Any("err", err))
+		}
+	}()
 
 	addr := envOr("ANVIL_RUNNER_ADDR", ":9090")
 	image := os.Getenv("ANVIL_SANDBOX_IMAGE")

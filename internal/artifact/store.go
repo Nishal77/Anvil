@@ -10,6 +10,11 @@ import (
 	"github.com/google/uuid"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+
+	"github.com/anvil-dev/anvil/internal/telemetry"
 )
 
 // Config configures a Store.
@@ -83,10 +88,19 @@ func objectKey(jobID uuid.UUID) string {
 // is the archive's exact byte length — required by the S3 PutObject
 // API to stream without buffering the whole archive in memory first.
 func (s *Store) Upload(ctx context.Context, jobID uuid.UUID, r io.Reader, size int64) (string, error) {
+	ctx, span := telemetry.Tracer("storage").Start(ctx, "artifact.upload", trace.WithAttributes(
+		telemetry.AttrJobID.String(jobID.String()),
+		attribute.Int64("anvil.bytes", size),
+	))
+	defer span.End()
+
 	key := objectKey(jobID)
 	_, err := s.client.PutObject(ctx, s.bucket, key, r, size, minio.PutObjectOptions{ContentType: "application/gzip"})
 	if err != nil {
-		return "", fmt.Errorf("artifact: upload job %s: %w", jobID, err)
+		wrapped := fmt.Errorf("artifact: upload job %s: %w", jobID, err)
+		span.RecordError(wrapped)
+		span.SetStatus(codes.Error, wrapped.Error())
+		return "", wrapped
 	}
 	return key, nil
 }

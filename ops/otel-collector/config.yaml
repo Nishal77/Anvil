@@ -1,0 +1,45 @@
+# OTel Collector config (PRD §17.1, §18.1). Sits between the control
+# plane / Runner and Tempo: every anvil-* process exports spans here
+# over OTLP/gRPC (internal/telemetry.NewTracerProvider), and the
+# Collector forwards them on to Tempo's own OTLP receiver.
+#
+# A Collector in front of Tempo, rather than exporting straight to
+# Tempo, is what makes the batching and retry behavior configurable in
+# one place instead of duplicated in every anvil-* process's exporter
+# setup, and is the standard, documented way to run this pipeline —
+# not a decision specific to this project.
+#
+# Load with: otelcol --config ops/otel-collector/config.yaml
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+
+processors:
+  # Caps memory before it becomes the Collector's own outage — a spike
+  # in span volume must degrade (drop under batch, refused_by_limiter)
+  # rather than OOM the one process every other component's traces
+  # depend on.
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 200
+    spike_limit_mib: 50
+
+  batch:
+    timeout: 5s
+    send_batch_size: 512
+
+exporters:
+  otlp/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true # same private network as every other component, PRD §18.1
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlp/tempo]

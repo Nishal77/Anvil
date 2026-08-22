@@ -5,10 +5,15 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/sync/errgroup"
+
+	"github.com/anvil-dev/anvil/internal/telemetry"
 )
 
 const pollInterval = 2 * time.Second
@@ -89,6 +94,14 @@ type Dispatcher struct {
 	sweepInterval     time.Duration
 	runStep           func(ctx context.Context, job *Job) error
 	destroySandbox    func(ctx context.Context, sandboxID string) error
+
+	// busyWorkers backs anvil_worker_utilization_ratio (PRD §17.2) —
+	// how many of this process's numWorkers are currently inside runJob.
+	// A plain int64, not a mutex: it's only ever incremented/decremented
+	// by atomic.AddInt64 from worker goroutines and read by the gauge
+	// update alongside them, never needing a consistent read together
+	// with any other field.
+	busyWorkers int64
 }
 
 // New constructs a Dispatcher from cfg, or returns an error if cfg is
@@ -112,10 +125,11 @@ func New(cfg Config) (*Dispatcher, error) {
 	}, nil
 }
 
-// Run starts NumWorkers worker goroutines and one sweeper goroutine, and
-// blocks until ctx is cancelled. Every started goroutine has exited before
-// Run returns (CLAUDE.md I-5, CODE-STANDARDS C1-C3): workers release any
-// held lease before exiting; the sweeper exits at its next tick check.
+// Run starts NumWorkers worker goroutines, one sweeper goroutine, and one
+// queue-depth gauge goroutine, and blocks until ctx is cancelled. Every
+// started goroutine has exited before Run returns (CLAUDE.md I-5,
+// CODE-STANDARDS C1-C3): workers release any held lease before exiting;
+// the sweeper and gauge loop exit at their next tick check.
 func (d *Dispatcher) Run(ctx context.Context) error {
 	g, gctx := errgroup.WithContext(ctx)
 
@@ -124,6 +138,7 @@ func (d *Dispatcher) Run(ctx context.Context) error {
 		g.Go(func() error { return d.worker(gctx, workerID) })
 	}
 	g.Go(func() error { return d.sweepLoop(gctx) })
+	g.Go(func() error { return d.queueDepthLoop(gctx) })
 
 	if err := g.Wait(); err != nil {
 		return fmt.Errorf("queue: dispatcher run: %w", err)
@@ -164,6 +179,13 @@ func (d *Dispatcher) worker(ctx context.Context, workerID string) error {
 // reclaims it immediately instead of stranding it for the full lease TTL
 // (graceful shutdown must not abandon leases).
 func (d *Dispatcher) runJob(ctx context.Context, workerID string, job *Job) {
+	busy := atomic.AddInt64(&d.busyWorkers, 1)
+	workerUtilization.Set(float64(busy) / float64(d.numWorkers))
+	defer func() {
+		busy := atomic.AddInt64(&d.busyWorkers, -1)
+		workerUtilization.Set(float64(busy) / float64(d.numWorkers))
+	}()
+
 	hbCtx, stopHeartbeat := context.WithCancel(ctx)
 	hbDone := make(chan struct{})
 	go func() {
@@ -171,7 +193,7 @@ func (d *Dispatcher) runJob(ctx context.Context, workerID string, job *Job) {
 		d.heartbeatLoop(hbCtx, workerID, job)
 	}()
 
-	stepErr := d.runStep(ctx, job)
+	stepErr := d.runJobExecuteSpan(ctx, job)
 
 	stopHeartbeat()
 	<-hbDone // no heartbeat goroutine outlives runJob (CLAUDE.md I-5)
@@ -207,6 +229,27 @@ func (d *Dispatcher) runJob(ctx context.Context, workerID string, job *Job) {
 	}
 }
 
+// runJobExecuteSpan wraps d.runStep in the "job.execute" span PRD §17.1's
+// tree shows as the parent of everything a step does (llm.plan,
+// step.execute, artifact.upload, deploy.preview). Split out of runJob
+// purely to keep that function's branching under CLAUDE.md's
+// cyclomatic-complexity limit.
+func (d *Dispatcher) runJobExecuteSpan(ctx context.Context, job *Job) error {
+	spanCtx := telemetry.ContextWithTraceID(ctx, job.TraceID)
+	spanCtx, span := telemetry.Tracer("queue").Start(spanCtx, "job.execute", trace.WithAttributes(
+		telemetry.AttrJobID.String(job.ID.String()),
+		telemetry.AttrAttempt.Int(job.Attempt),
+	))
+	defer span.End()
+
+	err := d.runStep(spanCtx, job)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+	}
+	return err
+}
+
 // reclaimOnShutdown accepts the already-cancelled ctx for logging only —
 // the cleanup write itself is deliberately rooted at context.Background(),
 // not derived from ctx, since ctx is Done by the time this runs and a
@@ -235,6 +278,34 @@ func (d *Dispatcher) heartbeatLoop(ctx context.Context, workerID string, job *Jo
 				}
 				return
 			}
+		}
+	}
+}
+
+// queueDepthInterval bounds how stale anvil_queue_depth and
+// anvil_queue_oldest_pending_seconds can be — deliberately not tied to
+// sweepInterval, which exists for a different reason (lease expiry) and
+// could be configured far apart from what makes a good gauge refresh
+// rate.
+const queueDepthInterval = 5 * time.Second
+
+// queueDepthLoop keeps anvil_queue_depth and
+// anvil_queue_oldest_pending_seconds current — PRD §17.2 documents both
+// as the numbers that justify extracting the Runner into a standalone
+// service (PRD §9.8) if they start climbing under load.
+func (d *Dispatcher) queueDepthLoop(ctx context.Context) error {
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-d.clock.After(queueDepthInterval):
+			depth, oldestSeconds, err := queueDepthSnapshot(ctx, d.pool)
+			if err != nil {
+				d.log.ErrorContext(ctx, "queue depth snapshot failed", slog.Any("err", err))
+				continue
+			}
+			queueDepth.Set(float64(depth))
+			queueOldestPendingSeconds.Set(oldestSeconds)
 		}
 	}
 }

@@ -1,0 +1,43 @@
+{
+  "title": "Anvil / Job Funnel",
+  "uid": "anvil-job-funnel",
+  "tags": ["anvil"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "30s",
+  "time": { "from": "now-24h", "to": "now" },
+  "panels": [
+    {
+      "title": "Jobs by stage reached (created → planned → approved → running → succeeded)",
+      "description": "Each bar is a cumulative count of anvil_jobs_total for the status that marks that stage. A job counts toward every stage it passed through, so the bars are expected to shrink left to right — the shrinkage at each step is the drop-off PRD §17.3 asks this dashboard to show.",
+      "type": "bargauge",
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 0 },
+      "targets": [
+        { "expr": "sum(anvil_jobs_total{status=\"PENDING_PLAN\"})", "legendFormat": "1. created" },
+        { "expr": "sum(anvil_jobs_total{status=\"AWAITING_APPROVAL\"}) + sum(anvil_jobs_total{status=\"QUEUED\"})", "legendFormat": "2. planned" },
+        { "expr": "sum(anvil_jobs_total{status=\"QUEUED\"})", "legendFormat": "3. approved" },
+        { "expr": "sum(anvil_jobs_total{status=\"RUNNING\"})", "legendFormat": "4. running" },
+        { "expr": "sum(anvil_jobs_total{status=\"SUCCEEDED\"})", "legendFormat": "5. succeeded" }
+      ],
+      "options": { "orientation": "horizontal", "displayMode": "gradient" }
+    },
+    {
+      "title": "Terminal outcome rate",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 10 },
+      "targets": [
+        { "expr": "rate(anvil_jobs_total{status=\"SUCCEEDED\"}[15m])", "legendFormat": "succeeded" },
+        { "expr": "rate(anvil_jobs_total{status=\"FAILED\"}[15m])", "legendFormat": "failed" },
+        { "expr": "rate(anvil_jobs_total{status=\"CANCELLED\"}[15m])", "legendFormat": "cancelled" }
+      ]
+    },
+    {
+      "title": "Step outcomes",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 18 },
+      "targets": [
+        { "expr": "sum by (status) (rate(anvil_job_steps_total[15m]))", "legendFormat": "{{status}}" }
+      ]
+    }
+  ]
+}

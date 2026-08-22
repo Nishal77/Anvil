@@ -1,0 +1,46 @@
+{
+  "title": "Anvil / Cost",
+  "uid": "anvil-cost",
+  "tags": ["anvil"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "1m",
+  "time": { "from": "now-30d", "to": "now" },
+  "panels": [
+    {
+      "title": "Budget burn-down (monthly cap)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 0 },
+      "targets": [{ "expr": "anvil_llm_budget_remaining_usd", "legendFormat": "remaining USD" }],
+      "fieldConfig": { "defaults": { "unit": "currencyUSD" }, "overrides": [] },
+      "thresholds": { "steps": [{ "value": 0, "color": "green" }, { "value": 2, "color": "red" }] }
+    },
+    {
+      "title": "Spend by model",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "targets": [{ "expr": "sum by (model) (anvil_llm_cost_usd_total)", "legendFormat": "{{model}}" }],
+      "fieldConfig": { "defaults": { "unit": "currencyUSD" }, "overrides": [] }
+    },
+    {
+      "title": "Tokens by model and direction",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "targets": [{ "expr": "sum by (model, direction) (rate(anvil_llm_tokens_total[15m]))", "legendFormat": "{{model}} {{direction}}" }]
+    },
+    {
+      "title": "Spend by user (this month)",
+      "description": "The only PRD §17.3 Cost-dashboard figure Prometheus can't answer — anvil_llm_cost_usd_total is labeled by model only (see internal/llm/metrics.go), not user, to keep its label cardinality bounded regardless of how many users the deployment has. This panel queries Postgres directly instead.",
+      "type": "table",
+      "datasource": { "type": "postgres", "uid": "postgres" },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 16 },
+      "targets": [
+        {
+          "rawSql": "SELECT user_id, SUM(cost_usd_micros)::float8 / 1000000 AS spend_usd FROM jobs WHERE created_at >= date_trunc('month', now()) GROUP BY user_id ORDER BY spend_usd DESC LIMIT 20",
+          "format": "table"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "currencyUSD" }, "overrides": [] }
+    }
+  ]
+}

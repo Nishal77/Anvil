@@ -106,6 +106,7 @@ func Transition(ctx context.Context, q querier, jobID uuid.UUID, from, to Status
 		// the same failure as a statically illegal edge.
 		return &IllegalTransitionError{JobID: jobID, From: from, To: to}
 	}
+	recordTransitionMetrics(from, to)
 	return nil
 }
 

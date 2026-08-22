@@ -1,0 +1,27 @@
+[Unit]
+Description=Anvil Control Plane
+Documentation=https://github.com/anvil-dev/anvil
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Runs as its own restricted user — never as root, and never as the
+# anvil-runner user (I-4: the control plane must never be able to
+# reach the Docker socket, even by accident of shared file
+# permissions).
+User=anvil
+Group=anvil
+
+EnvironmentFile=/etc/anvil/anvil.env
+ExecStart=/usr/local/bin/anvil
+
+Restart=always
+RestartSec=2s
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

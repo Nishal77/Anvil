@@ -8,6 +8,10 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+
+	"github.com/anvil-dev/anvil/internal/telemetry"
 )
 
 const (
@@ -120,6 +124,35 @@ func NewRouter(cfg Config) (*Router, error) {
 // ErrRateLimited fails over to the next provider immediately without
 // retrying the same one and without counting against its breaker.
 func (r *Router) Complete(ctx context.Context, jobID uuid.UUID, req Request) (Response, error) {
+	spanName := "llm.complete"
+	if req.TaskClass == TaskPlanning {
+		spanName = "llm.plan" // PRD §17.1's tree names the planner's call distinctly from a step's
+	}
+	ctx, span := telemetry.Tracer("llm").Start(ctx, spanName, trace.WithAttributes(
+		telemetry.AttrJobID.String(jobID.String()),
+	))
+	defer span.End()
+
+	resp, err := r.complete(ctx, jobID, req)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return resp, err
+	}
+	span.SetAttributes(
+		telemetry.AttrModel.String(resp.Model),
+		telemetry.AttrTokensIn.Int64(resp.Usage.InputTokens),
+		telemetry.AttrTokensOut.Int64(resp.Usage.OutputTokens),
+		telemetry.AttrCostUSDMicros.Int64(costUSDMicros(resp.Model, resp.Usage)),
+	)
+	return resp, nil
+}
+
+// complete is Router.Complete's actual body, split out so the span
+// wrapper above stays a thin, uniform shape regardless of how many
+// branches complete itself grows — CLAUDE.md's complexity limit is on
+// complete, not on span bookkeeping around it.
+func (r *Router) complete(ctx context.Context, jobID uuid.UUID, req Request) (Response, error) {
 	ladder, ok := r.providers[req.TaskClass]
 	if !ok || len(ladder) == 0 {
 		return Response{}, fmt.Errorf("llm: complete job %s: %w: no providers configured for task class %s", jobID, ErrAllProvidersExhausted, req.TaskClass)
@@ -191,14 +224,22 @@ func (r *Router) tryProvider(ctx context.Context, provider Provider, req Request
 
 	for attempt := 0; attempt <= r.maxRetries; attempt++ {
 		if !b.allow() {
+			llmCircuitState.WithLabelValues(provider.Name()).Set(circuitStateValue(true))
 			return Response{}, outcomeFailover, nil // breaker open: skip straight to the next provider
 		}
 
+		start := time.Now()
 		resp, err := provider.Complete(ctx, req)
+		latency := time.Since(start).Seconds()
+
 		if err == nil {
 			b.recordSuccess()
+			llmCircuitState.WithLabelValues(provider.Name()).Set(circuitStateValue(false))
+			llmRequestsTotal.WithLabelValues(provider.Name(), resp.Model, "success").Inc()
+			llmLatency.WithLabelValues(resp.Model).Observe(latency)
 			return resp, outcomeSuccess, nil
 		}
+		llmRequestsTotal.WithLabelValues(provider.Name(), "", "error").Inc()
 
 		switch {
 		case errors.Is(err, ErrRateLimited):
@@ -209,6 +250,7 @@ func (r *Router) tryProvider(ctx context.Context, provider Provider, req Request
 			return Response{}, outcomeFailover, nil
 		case errors.Is(err, ErrProviderUnavailable):
 			b.recordFailure()
+			llmCircuitState.WithLabelValues(provider.Name()).Set(circuitStateValue(b.isOpen()))
 			if attempt == r.maxRetries {
 				return Response{}, outcomeFailover, nil
 			}

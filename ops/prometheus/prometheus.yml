@@ -1,0 +1,32 @@
+# Prometheus config (PRD §17.2, §18.1). One scrape target: the control
+# plane's own /metrics — every metric in PRD §17.2, including
+# internal/sandbox's client-side sandbox_* series, is registered
+# against the process-global default registry inside the anvil binary
+# (cmd/anvil), so there is exactly one process to scrape. The Runner
+# (cmd/runner) does not expose /metrics: nothing in this codebase
+# registers a Prometheus collector there today.
+#
+# host.docker.internal resolves to the Docker host from inside this
+# container (docker-compose.yml's extra_hosts) — the same
+# host-networking reason ops/caddy/caddy.json and this repo's own
+# docker-compose.yml already document for why Caddy and the anvil
+# binaries run directly on the host, not as compose services.
+#
+# Load with: prometheus --config.file ops/prometheus/prometheus.yml
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - alerts.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
+scrape_configs:
+  - job_name: anvil-api
+    static_configs:
+      - targets: ["host.docker.internal:8080"]

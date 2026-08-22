@@ -8,8 +8,12 @@ import (
 	"io"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/anvil-dev/anvil/internal/sandbox"
+	"github.com/anvil-dev/anvil/internal/telemetry"
 )
 
 // Deployer builds a job's finished workspace into a preview
@@ -81,6 +85,24 @@ func New(cfg Config) (*DockerDeployer, error) {
 
 // Deploy implements Deployer.
 func (d *DockerDeployer) Deploy(ctx context.Context, jobID uuid.UUID, archive []byte) (string, error) {
+	ctx, span := telemetry.Tracer("deploy").Start(ctx, "deploy.preview", trace.WithAttributes(
+		telemetry.AttrJobID.String(jobID.String()),
+	))
+	defer span.End()
+
+	url, err := d.deploy(ctx, jobID, archive)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return "", err
+	}
+	span.SetAttributes(attribute.String("anvil.preview_url", url))
+	return url, nil
+}
+
+// deploy is Deploy's actual body, split out so the span wrapper above
+// stays a thin, uniform shape.
+func (d *DockerDeployer) deploy(ctx context.Context, jobID uuid.UUID, archive []byte) (string, error) {
 	buildContext, err := EnsureDockerfile(archive)
 	if err != nil {
 		return "", fmt.Errorf("deploy: %w", err)

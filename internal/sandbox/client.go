@@ -17,6 +17,12 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+
+	"github.com/anvil-dev/anvil/internal/telemetry"
 )
 
 // maxExecLineBytes bounds how big a single line of output from the Runner
@@ -35,6 +41,20 @@ type Config struct {
 func (c *Config) setDefaults() {
 	if c.HTTPClient == nil {
 		c.HTTPClient = http.DefaultClient
+	}
+	// otelhttp.NewTransport injects the active span's W3C traceparent
+	// header into every outgoing request and wraps the round trip in its
+	// own client span — the mechanism that carries a job's trace across
+	// the process boundary to the Runner (PRD §17.1's "container.run"
+	// spans nest under this). Wrapping unconditionally, even a
+	// caller-supplied client (a test's fake transport, say), keeps this
+	// the one place that decides whether outbound sandbox calls are
+	// traced — nothing downstream has to opt in per call site.
+	c.HTTPClient = &http.Client{
+		Transport:     otelhttp.NewTransport(c.HTTPClient.Transport),
+		CheckRedirect: c.HTTPClient.CheckRedirect,
+		Jar:           c.HTTPClient.Jar,
+		Timeout:       c.HTTPClient.Timeout,
 	}
 }
 
@@ -66,6 +86,18 @@ func New(cfg Config) (*Client, error) {
 
 // Create asks the Runner to create a sandbox for jobID and returns its ID.
 func (c *Client) Create(ctx context.Context, jobID uuid.UUID) (string, error) {
+	start := time.Now()
+	id, err := c.create(ctx, jobID)
+	sandboxCreateDuration.Observe(time.Since(start).Seconds())
+	if err == nil {
+		sandboxActive.Inc()
+	}
+	return id, err
+}
+
+// create is Create's actual body, split out so the metrics wrapper
+// above stays a thin, uniform shape.
+func (c *Client) create(ctx context.Context, jobID uuid.UUID) (string, error) {
 	body, err := json.Marshal(CreateRequest{JobID: jobID})
 	if err != nil {
 		return "", fmt.Errorf("sandbox: create: encode request: %w", err)
@@ -98,6 +130,30 @@ func (c *Client) Create(ctx context.Context, jobID uuid.UUID) (string, error) {
 // as it arrives over the HTTP chunked response — never buffers until the
 // command exits. Exec returns once the command exits or ctx is cancelled.
 func (c *Client) Exec(ctx context.Context, sandboxID, command string, timeout time.Duration, onChunk func(ExecChunk)) error {
+	ctx, span := telemetry.Tracer("sandbox").Start(ctx, "sandbox.exec",
+		trace.WithAttributes(attribute.String("anvil.command", command)))
+	defer span.End()
+
+	start := time.Now()
+	err := c.execBody(ctx, sandboxID, command, timeout, onChunk)
+	sandboxExecDuration.Observe(time.Since(start).Seconds())
+	if errors.Is(err, ErrCommandTimeout) {
+		sandboxTimeoutKillsTotal.Inc()
+	}
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+	return nil
+}
+
+// execBody is Exec's actual body, split out so the span wrapper above
+// stays a thin, uniform shape — and so it, not Exec itself, is what
+// otelhttp.NewTransport's per-request client span nests under, matching
+// PRD §17.1's tree (sandbox.exec is the parent, the HTTP round trip and
+// the Runner's own container.run span are children of it).
+func (c *Client) execBody(ctx context.Context, sandboxID, command string, timeout time.Duration, onChunk func(ExecChunk)) error {
 	body, err := json.Marshal(ExecRequest{
 		SandboxID: sandboxID,
 		Command:   command,
@@ -336,6 +392,7 @@ func (c *Client) Destroy(ctx context.Context, sandboxID string) error {
 	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusNotFound {
 		return fmt.Errorf("sandbox: destroy: runner returned %s", resp.Status)
 	}
+	sandboxActive.Dec()
 	return nil
 }
 

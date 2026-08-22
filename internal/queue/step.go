@@ -155,5 +155,6 @@ func FinishStep(ctx context.Context, pool *pgxpool.Pool, stepID uuid.UUID, statu
 	if _, err := pool.Exec(ctx, finishStepSQL, stepID, string(status), stepErr); err != nil {
 		return fmt.Errorf("queue: finish step %s: %w", stepID, err)
 	}
+	jobStepsTotal.WithLabelValues(string(status)).Inc()
 	return nil
 }

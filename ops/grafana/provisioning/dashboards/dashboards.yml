@@ -1,0 +1,19 @@
+# Grafana dashboard provisioning (PRD §17.3) — loads every .json file
+# in ops/grafana/provisioning/dashboards/files/ on startup (nested here,
+# not alongside this file directly, so docker-compose.yml's grafana
+# service needs only one bind mount for the whole provisioning tree —
+# see that file's own comment). allowUiUpdates is false: these files
+# are the source of truth ("provisioned as code"), so an edit made in
+# the Grafana UI must not silently diverge from what's checked into
+# this repo.
+
+apiVersion: 1
+
+providers:
+  - name: anvil
+    type: file
+    disableDeletion: false
+    allowUiUpdates: false
+    updateIntervalSeconds: 30
+    options:
+      path: /etc/grafana/provisioning/dashboards/files

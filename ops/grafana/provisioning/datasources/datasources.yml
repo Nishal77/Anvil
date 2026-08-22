@@ -1,0 +1,55 @@
+# Grafana datasource provisioning (PRD §17.3, §18.1) — three sources:
+# Prometheus for every anvil_* metric, Tempo for traces, and Postgres
+# directly for the one figure Prometheus can't answer (spend by user —
+# there is no per-user cardinality label on anvil_llm_cost_usd_total;
+# see internal/llm/metrics.go's own doc comment on why that label set
+# is deliberately model-only, not per-user, to keep it small).
+#
+# derivedFields on the Prometheus datasource is EG-3's other half:
+# internal/api's jobResponse.trace_id (returned by GET /v1/jobs/{id})
+# is what the frontend uses to build a direct Tempo Explore link — see
+# web/lib for that link construction. This provisioning entry is what
+# makes clicking a trace ID *inside* a Prometheus-backed panel (e.g. a
+# log line, once structured logs are wired to Loki) jump to Tempo too.
+
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    jsonData:
+      exemplarTraceIdDestinations:
+        - datasourceUid: tempo
+          name: trace_id
+
+  - name: Tempo
+    type: tempo
+    access: proxy
+    url: http://tempo:3200
+    uid: tempo
+    jsonData:
+      tracesToMetrics:
+        datasourceUid: prometheus
+
+  - name: Postgres
+    type: postgres
+    uid: postgres
+    access: proxy
+    # $__env{VAR} is Grafana's own provisioning-file env substitution
+    # syntax (not shell ${VAR} expansion, which nothing here performs)
+    # — resolved against the grafana process's environment, set in
+    # docker-compose.yml's grafana service. Deliberately not the
+    # GF_DATABASE_* names: those are Grafana's own reserved config for
+    # its *internal* metadata store, a different database entirely —
+    # reusing them here would silently repoint Grafana's own storage.
+    url: "$__env{ANVIL_DATABASE_HOST}:5432"
+    database: anvil
+    user: "$__env{ANVIL_DATABASE_USER}"
+    secureJsonData:
+      password: "$__env{ANVIL_DATABASE_PASSWORD}"
+    jsonData:
+      sslmode: require
+      postgresVersion: 1600

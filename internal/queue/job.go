@@ -10,6 +10,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/anvil-dev/anvil/internal/telemetry"
 )
 
 // Status mirrors the job_status enum defined in PRD §13.1.
@@ -84,6 +86,12 @@ type Job struct {
 	TokenBudget   int64
 	TokensUsed    int64
 	CostUSDMicros int64
+	// TraceID is the hex-encoded OpenTelemetry trace ID of the span
+	// active when the job was created (PRD §17.1) — empty for a job
+	// created with tracing disabled, or through CreateQueuedJob's
+	// test-only path. The frontend uses it to deep-link a job straight
+	// to its Grafana trace (EG-3).
+	TraceID string
 }
 
 // JobOptions mirrors POST /v1/jobs' request body options (PRD §11.3) —
@@ -121,7 +129,7 @@ const jobColumns = `id, user_id, prompt, status, COALESCE(failure_reason, ''),
 	run_after, created_at, started_at, finished_at, COALESCE(sandbox_id, ''),
 	COALESCE(plan_summary, ''), plan_risks, auto_approve, cancel_requested_at,
 	COALESCE(artifact_key, ''), create_repo, deploy, COALESCE(preview_url, ''),
-	token_budget, tokens_used, cost_usd_micros`
+	token_budget, tokens_used, cost_usd_micros, COALESCE(trace_id, '')`
 
 // scanJob reads one jobColumns-shaped row into a Job.
 func scanJob(row pgx.Row) (*Job, error) {
@@ -132,7 +140,7 @@ func scanJob(row pgx.Row) (*Job, error) {
 		&j.RunAfter, &j.CreatedAt, &j.StartedAt, &j.FinishedAt, &j.SandboxID,
 		&j.PlanSummary, &j.PlanRisks, &j.AutoApprove, &j.CancelRequestedAt,
 		&j.ArtifactKey, &j.CreateRepo, &j.Deploy, &j.PreviewURL,
-		&j.TokenBudget, &j.TokensUsed, &j.CostUSDMicros,
+		&j.TokenBudget, &j.TokensUsed, &j.CostUSDMicros, &j.TraceID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("queue: scan job: %w", err)
@@ -143,17 +151,23 @@ func scanJob(row pgx.Row) (*Job, error) {
 // const string concatenation (both operands are untyped constants) —
 // not a package-level var (CLAUDE.md §5.2).
 const createJobSQL = `
-INSERT INTO jobs (user_id, prompt, auto_approve, create_repo, deploy)
-VALUES ($1, $2, $3, $4, $5)
+INSERT INTO jobs (user_id, prompt, auto_approve, create_repo, deploy, trace_id)
+VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''))
 RETURNING ` + jobColumns
 
 // CreateJob inserts a new job in PENDING_PLAN, immediately claimable by
-// the planner.
+// the planner. trace_id is read from ctx's active span (PRD §17.1: "trace
+// ID is generated at the API edge, stored on jobs.trace_id") — the empty
+// string when tracing is disabled or ctx carries none, which NULLIF
+// turns into a real SQL NULL rather than storing an empty string that
+// would read as a (wrong) present-but-blank trace.
 func CreateJob(ctx context.Context, pool *pgxpool.Pool, userID uuid.UUID, prompt string, opts JobOptions) (*Job, error) {
-	j, err := scanJob(pool.QueryRow(ctx, createJobSQL, userID, prompt, opts.AutoApprove, opts.CreateRepo, opts.Deploy))
+	traceID := telemetry.TraceIDFromContext(ctx)
+	j, err := scanJob(pool.QueryRow(ctx, createJobSQL, userID, prompt, opts.AutoApprove, opts.CreateRepo, opts.Deploy, traceID))
 	if err != nil {
 		return nil, fmt.Errorf("queue: create job: %w", err)
 	}
+	jobsActive.Inc()
 	return j, nil
 }
 
@@ -171,6 +185,7 @@ func CreateQueuedJob(ctx context.Context, pool *pgxpool.Pool, userID uuid.UUID, 
 	if err != nil {
 		return nil, fmt.Errorf("queue: create queued job: %w", err)
 	}
+	jobsActive.Inc()
 	return j, nil
 }
 

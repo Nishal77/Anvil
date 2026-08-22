@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -92,6 +93,7 @@ func (h *Hub) Subscribe(jobID uuid.UUID) (<-chan storage.Event, func()) {
 	h.mu.Unlock()
 
 	h.ensureRedisSubscription(jobID)
+	sseSubscribers.Inc()
 
 	unsubscribe := func() {
 		h.mu.Lock()
@@ -100,6 +102,7 @@ func (h *Hub) Subscribe(jobID uuid.UUID) (<-chan storage.Event, func()) {
 		for i, s := range subs {
 			if s == sub {
 				h.subs[jobID] = append(subs[:i], subs[i+1:]...)
+				sseSubscribers.Dec() // only on an actual removal — unsubscribe may be called more than once
 				break
 			}
 		}
@@ -160,6 +163,8 @@ func (h *Hub) broadcast(jobID uuid.UUID, ev storage.Event) {
 	subs := append([]*subscriber(nil), h.subs[jobID]...)
 	h.mu.RUnlock()
 
+	sseEventsPublishedTotal.WithLabelValues(string(ev.Type)).Inc()
+	sseDeliveryLatency.Observe(time.Since(ev.CreatedAt).Seconds())
 	for _, s := range subs {
 		s.send(ev)
 	}

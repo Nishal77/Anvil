@@ -1,0 +1,33 @@
+# Tempo config (PRD §17.1, §18.1). Single-binary mode with local-disk
+# storage — the whole stack runs on one Hetzner CX22 (§18.1's
+# topology), so there is no separate object-storage tier to configure;
+# a WAL + local blocks directory is enough for this project's trace
+# volume and retention needs.
+#
+# Load with: tempo --config.file ops/tempo/tempo.yaml
+
+server:
+  http_listen_port: 3200
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+
+ingester:
+  trace_idle_period: 10s
+  max_block_duration: 5m
+
+compactor:
+  compaction:
+    block_retention: 168h # 7 days — matches this project's cost model, not a Tempo default
+
+storage:
+  trace:
+    backend: local
+    local:
+      path: /var/tempo/blocks
+    wal:
+      path: /var/tempo/wal

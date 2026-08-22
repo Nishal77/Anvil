@@ -7,8 +7,10 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/anvil-dev/anvil/internal/llm"
+	"github.com/anvil-dev/anvil/internal/telemetry"
 )
 
 // PolicyDecision is Policy.Evaluate's verdict.
@@ -94,33 +96,55 @@ func NewPolicyEngine(cfg PolicyEngineConfig) (*PolicyEngine, error) {
 
 // Evaluate runs call through all 7 rules in order, first match wins.
 func (p *PolicyEngine) Evaluate(ctx context.Context, jobID uuid.UUID, call ToolCall) (PolicyDecision, string) {
+	ctx, span := telemetry.Tracer("agent").Start(ctx, "policy.evaluate", trace.WithAttributes(
+		telemetry.AttrJobID.String(jobID.String()),
+		telemetry.AttrToolName.String(call.Name),
+	))
+	defer span.End()
+
+	decision, reason := p.evaluate(ctx, jobID, call)
+	span.SetAttributes(telemetry.AttrPolicyDecision.String(decision.String()))
+	return decision, reason
+}
+
+// evaluate is Evaluate's actual 7-rule body, split out so the span
+// wrapper above stays a thin, uniform shape.
+func (p *PolicyEngine) evaluate(ctx context.Context, jobID uuid.UUID, call ToolCall) (PolicyDecision, string) {
+	// deny records anvil_policy_denials_total (PRD §17.2) before
+	// returning, so every one of the 7 rules' Deny paths is counted the
+	// same way exactly once, at the one place that actually decides.
+	deny := func(rule, reason string) (PolicyDecision, string) {
+		policyDenialsTotal.WithLabelValues(call.Name, rule).Inc()
+		return Deny, reason
+	}
+
 	tool, registered := p.cfg.Registry.Lookup(call.Name) // rule 1
 	if !registered {
-		return Deny, fmt.Sprintf("tool %q is not registered", call.Name)
+		return deny("not_registered", fmt.Sprintf("tool %q is not registered", call.Name))
 	}
 
 	if err := p.cfg.Registry.ValidateArgs(call.Name, call.Args); err != nil { // rule 2
-		return Deny, err.Error()
+		return deny("invalid_args", err.Error())
 	}
 
 	if strings.HasPrefix(call.Name, "fs_") { // rule 3
 		if reason := p.evaluateFSPathEscape(ctx, call); reason != "" {
-			return Deny, reason
+			return deny("fs_path_escape", reason)
 		}
 	}
 
 	if call.Name == "exec" { // rule 4
 		if reason := p.evaluateExecBlocklist(call); reason != "" {
-			return Deny, reason
+			return deny("exec_blocklist", reason)
 		}
 	}
 
 	if reason := p.evaluatePrivileged(tool, call.CreateRepo); reason != "" { // rule 5
-		return Deny, reason
+		return deny("privileged", reason)
 	}
 
 	if reason := p.evaluateBudget(ctx, jobID); reason != "" { // rule 6
-		return Deny, reason
+		return deny("budget", reason)
 	}
 
 	return Allow, "" // rule 7

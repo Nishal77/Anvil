@@ -1,0 +1,57 @@
+# Alert rules (PRD §17.4). Six alerts, three severities routed by
+# ops/prometheus/alertmanager.yml: page (wakes someone up), warn (needs
+# attention this business day), info (dashboard-visible, no
+# notification escalation beyond email).
+
+groups:
+  - name: anvil
+    rules:
+      - alert: AnvilBudgetCritical
+        expr: anvil_llm_budget_remaining_usd < 2
+        labels:
+          severity: page
+        annotations:
+          summary: "LLM monthly budget nearly exhausted"
+          description: "anvil_llm_budget_remaining_usd is {{ $value | printf \"%.2f\" }} — under $2 remaining before ErrGlobalCapExceeded stops every job."
+
+      - alert: AnvilQueueStalled
+        expr: anvil_queue_oldest_pending_seconds > 600
+        labels:
+          severity: page
+        annotations:
+          summary: "Queue not draining"
+          description: "The oldest eligible QUEUED job has been waiting {{ $value | printf \"%.0f\" }}s — the dispatcher may be wedged or every worker may be stuck."
+
+      - alert: AnvilHighJobFailureRate
+        expr: rate(anvil_jobs_total{status="FAILED"}[15m]) > 0.5
+        labels:
+          severity: warn
+        annotations:
+          summary: "High job failure rate"
+          description: "More than half of jobs transitioning in the last 15m landed in FAILED ({{ $value | printf \"%.2f\" }}/s)."
+
+      - alert: AnvilSandboxLeak
+        expr: anvil_sandbox_active > 10
+        for: 10m
+        labels:
+          severity: warn
+        annotations:
+          summary: "Sandbox count not shrinking"
+          description: "anvil_sandbox_active has held above 10 for 10 minutes — sandboxes may be leaking (not destroyed after their job finishes)."
+
+      - alert: AnvilLLMCircuitOpen
+        expr: anvil_llm_circuit_state == 1
+        for: 5m
+        labels:
+          severity: warn
+        annotations:
+          summary: "LLM provider circuit breaker open"
+          description: "Provider {{ $labels.provider }}'s circuit has been open for 5 minutes — every call is failing over to the next provider in the ladder."
+
+      - alert: AnvilSubscriberDrops
+        expr: rate(anvil_sse_subscriber_drops_total[5m]) > 0
+        labels:
+          severity: info
+        annotations:
+          summary: "SSE subscribers missing events"
+          description: "At least one open SSE connection is falling behind and receiving stream_gap markers (FR-054)."
